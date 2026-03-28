@@ -5,7 +5,7 @@
 
 <p align="center">
   <a href="#install">Install</a> &bull;
-  <a href="#when-to-use-what">When to use what</a> &bull;
+  <a href="#usage">Usage</a> &bull;
   <a href="#how-it-works">How it works</a> &bull;
   <a href="#limitations">Limitations</a> &bull;
   <a href="LICENSE">License</a>
@@ -15,7 +15,9 @@
 
 > **Linux only** — tested on Arch Linux with Wayland. May work on other distros but is not tested.
 
-Zen Browser doesn't sync spaces or tabs across devices yet. **zen-sync** fills that gap — push your entire browsing session from one machine to another in seconds.
+Zen Browser doesn't sync spaces or tabs across devices yet. **zen-sync** fills that gap. Push your entire browsing session from one machine to another in seconds.
+
+Built because I kept switching between my desktop and laptop and wanted my spaces and tabs to follow me. Firefox Sync covers bookmarks and passwords, but not Zen's workspaces. This tool transfers the raw session files over SSH, similar to [sharing a profile on a dual-boot system](https://github.com/zen-browser/desktop/discussions/2400).
 
 ## Install
 
@@ -36,44 +38,11 @@ zen-sync init
 - SSH access between devices (ideally with key-based auth via `ssh-copy-id`)
 - `python3` + `liblz4` (for `merge` and `status`)
 
-## When to use what
+## Usage
 
-### Switching devices
-
-You're done working on one machine and want to continue on the other.
-
-```bash
-# On the machine you're leaving:
-zen-sync push --restart
-```
-
-Your spaces, tabs, and session are now on the other device. This is the most common use case.
-
-### Coming back
-
-You worked on the laptop and now you're back at the desktop.
-
-```bash
-# On the desktop:
-zen-sync pull --restart
-```
-
-Pulls the laptop session to your desktop. Same as push but in reverse.
-
-### You forgot to sync and used both devices
-
-You opened new tabs on both machines. A regular push/pull would overwrite one side.
-
-```bash
-# On the machine you want to keep everything:
-zen-sync merge --restart
-```
-
-This adds tabs from the remote device into your local session without removing your existing tabs. Tabs are deduplicated by URL + workspace.
-
-> **Note:** Merge is one-directional (remote → local). If you want both devices to have everything, run `merge` and then `push --restart`.
-
-### Quick overview
+> **Zen must be closed on the target device before syncing.**
+> The target will overwrite synced files if Zen is still open. Use `--restart` to handle this automatically.
+> Zen on the source side can stay open, session files are auto-saved every ~15 seconds.
 
 | Situation | Command |
 |-----------|---------|
@@ -82,80 +51,50 @@ This adds tabs from the remote device into your local session without removing y
 | Used both, want to combine | `zen-sync merge --restart` |
 | Just check what's where | `zen-sync status` |
 
-### All commands
+### push / pull
+
+Transfers your complete session (spaces, tabs, preferences) to the other device. The target session is fully replaced.
 
 ```bash
-zen-sync push              # Push session to remote (close Zen on remote first)
-zen-sync pull              # Pull session from remote (close Zen locally first)
-zen-sync merge             # Merge remote tabs into local session
-zen-sync push --restart    # Auto-close Zen on remote, sync, reopen
-zen-sync pull --restart    # Auto-close Zen locally, sync, reopen
-zen-sync merge --restart   # Auto-close Zen locally, merge, reopen
-zen-sync status            # Compare spaces on both devices
-zen-sync init              # Setup wizard
+zen-sync push --restart    # Close Zen on remote, sync, reopen
+zen-sync pull --restart    # Close Zen locally, sync, reopen
 ```
+
+Without `--restart`, close Zen on the target device manually first.
+
+### merge
+
+Adds tabs from the remote device into your local session without removing existing tabs. Deduplicated by URL + workspace. A backup is created automatically before each merge.
+
+```bash
+zen-sync merge --restart
+```
+
+> Merge is one-directional (remote → local). To get everything on both devices, run `merge` then `push --restart`.
 
 ## How it works
 
-### Push / Pull
+Push/pull copies only the essential session files (~10 seconds over LAN):
 
-Copies only the files that matter:
+- `zen-sessions.jsonlz4` — space definitions & tab assignments
+- `sessionstore-backups/recovery.jsonlz4` — active session with all open tabs
+- `prefs.js` — active workspace & preferences
+- `containers.json` — container tab config
 
-| File | What it contains |
-|------|-----------------|
-| `zen-sessions.jsonlz4` | Space definitions & tab-to-space assignments |
-| `sessionstore-backups/recovery.jsonlz4` | Active session with all open tabs |
-| `sessionstore-backups/recovery.baklz4` | Session backup |
-| `sessionstore-backups/previous.jsonlz4` | Previous session |
-| `prefs.js` | Active workspace & preferences |
-| `containers.json` | Container tab configuration |
-
-This takes ~10 seconds over a local network. The target session is fully replaced.
-
-### Merge
-
-Reads both local and remote `zen-sessions.jsonlz4`, then:
-
-1. Adds missing spaces (by UUID)
-2. Adds missing tabs (deduplicated by URL + workspace)
-3. Adds missing tab folders and groups
-4. Updates the sessionstore so Zen loads the new tabs on startup
-
-A backup is created before every merge (`zen-sessions.jsonlz4.merge-backup-*`).
+Merge reads both `zen-sessions.jsonlz4` files, combines missing spaces and tabs, and updates the sessionstore so Zen loads them on startup.
 
 ## Limitations
 
-> This tool was built for a specific setup and may need adjustments for yours.
+> Built for a specific setup, may need adjustments for yours.
 
-**Tested environment:**
-- Arch Linux on both devices (desktop + laptop)
-- Wayland (Hyprland) — the `--restart` flag uses `WAYLAND_DISPLAY=wayland-1`
-- Local network (SSH over LAN)
+- **Linux only.** macOS/Windows store Zen profiles in different locations
+- **Wayland.** `--restart` reopen uses `WAYLAND_DISPLAY=wayland-1`. X11 or other compositors may need adjustment
+- **Single remote.** One remote device per config
+- **Push/pull overwrites.** Last push/pull wins, use `merge` to combine
+- **Same Zen version.** Both devices should run the same version
+- **Does not sync** bookmarks, passwords, history, extensions, cookies (use Firefox Sync for those)
 
-**Known limitations:**
-- **Linux only** — macOS and Windows store Zen profiles in different locations
-- **Wayland assumption** — `--restart` reopen uses hardcoded `WAYLAND_DISPLAY=wayland-1`. X11 or different compositors may need adjustment
-- **Single remote** — one remote device per config
-- **Push/pull overwrites** — last push/pull wins. Use `merge` if you need to combine
-- **Profile paths are fixed after init** — if Zen creates a new profile, re-run `zen-sync init`
-
-**What is NOT synced (use Firefox Sync for these):**
-- Bookmarks, passwords, history
-- Extensions and their data
-- Cookies and site storage
-
-## Good to know
-
-- Config lives in `~/.config/zen-sync/config`
-- Profile paths are auto-detected during `zen-sync init`
-- Both devices should run the **same Zen version** to avoid compatibility issues
-- Zen stores spaces in `zen-sessions.jsonlz4` (Mozilla LZ4 compressed JSON) and tabs in the sessionstore — both need to be in sync
-
-## Background
-
-Zen Browser (based on Firefox) doesn't offer cross-device sync for its custom features like spaces and workspaces. Firefox Sync handles bookmarks, passwords, and history, but not Zen-specific data.
-
-This tool works similarly to [sharing a profile folder on a dual-boot system](https://github.com/zen-browser/desktop/discussions/2400) — transferring the raw session files between machines.
+Config: `~/.config/zen-sync/config`. Profile paths are auto-detected during `zen-sync init`.
 
 ## License
 
