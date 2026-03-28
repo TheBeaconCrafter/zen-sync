@@ -2,9 +2,11 @@
 set -euo pipefail
 
 BIN_DIR="${HOME}/.local/bin"
-mkdir -p "$BIN_DIR"
+LIB_DIR="${HOME}/.local/lib/zen-sync"
+mkdir -p "$BIN_DIR" "$LIB_DIR"
 
 curl -fsSL https://raw.githubusercontent.com/enisbudancamanak/zen-sync/main/zen-sync -o "$BIN_DIR/zen-sync"
+curl -fsSL https://raw.githubusercontent.com/enisbudancamanak/zen-sync/main/merge.py -o "$LIB_DIR/merge.py"
 chmod +x "$BIN_DIR/zen-sync"
 
 echo "Installed zen-sync to $BIN_DIR/zen-sync"

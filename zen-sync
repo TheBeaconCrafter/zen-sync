@@ -64,6 +64,7 @@ usage() {
     printf "${B}  Usage:${R}\n"
     printf "    ${WHITE}zen-sync${R} ${GREEN}push${R}              ${D}Push session to remote${R}\n"
     printf "    ${WHITE}zen-sync${R} ${GREEN}pull${R}              ${D}Pull session from remote${R}\n"
+    printf "    ${WHITE}zen-sync${R} ${GREEN}merge${R}             ${D}Merge remote tabs into local${R}\n"
     printf "    ${WHITE}zen-sync${R} ${GREEN}push --restart${R}    ${D}Close Zen, sync, reopen${R}\n"
     printf "    ${WHITE}zen-sync${R} ${YELLOW}status${R}            ${D}Compare both devices${R}\n"
     printf "    ${WHITE}zen-sync${R} ${YELLOW}init${R}              ${D}Setup wizard${R}\n"
@@ -290,10 +291,72 @@ cmd_status() {
     printf "\n"
 }
 
+# ─── Merge ────────────────────────────────────────────────────────────
+cmd_merge() {
+    load_config
+    local restart=false
+    for arg in "$@"; do
+        [[ "$arg" == "--restart" ]] && restart=true
+    done
+
+    local remote="$REMOTE_USER@$REMOTE_HOST"
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    header "merge"
+    printf "  ${D}local${R} ${PURPLE}⇄${R} ${WHITE}${B}%s${R}\n\n" "$REMOTE_HOST"
+
+    $restart && zen_close_local
+
+    # Download remote files to temp dir
+    local tmp_dir=$(mktemp -d)
+    step "  ↓" "Fetching remote sessions..."
+    scp -q "$remote:$REMOTE_PROFILE/zen-sessions.jsonlz4" "$tmp_dir/zen-sessions.jsonlz4" 2>/dev/null \
+        || die "could not download remote zen-sessions"
+    scp -q "$remote:$REMOTE_PROFILE/sessionstore-backups/recovery.jsonlz4" "$tmp_dir/recovery.jsonlz4" 2>/dev/null || true
+    ok "Remote files downloaded"
+
+    # Run merge
+    step "  ⇄" "Merging sessions..."
+    local merge_py="$script_dir/merge.py"
+    [[ -f "$merge_py" ]] || merge_py="$(dirname "$(readlink -f "$0")")/merge.py"
+    [[ -f "$merge_py" ]] || merge_py="$HOME/.local/lib/zen-sync/merge.py"
+    [[ -f "$merge_py" ]] || die "merge.py not found. Re-run install."
+
+    local result
+    result=$(python3 "$merge_py" "$LOCAL_PROFILE" "$tmp_dir") || die "merge failed"
+
+    local new_spaces new_tabs new_folders new_groups session_merged
+    new_spaces=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['new_spaces'])")
+    new_tabs=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['new_tabs'])")
+    new_folders=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['new_folders'])")
+    new_groups=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['new_groups'])")
+    session_merged=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['session_merged'])")
+
+    printf "\n"
+    [[ "$new_spaces" -gt 0 ]] && ok "$new_spaces new spaces"
+    [[ "$new_tabs" -gt 0 ]] && ok "$new_tabs new tabs"
+    [[ "$new_folders" -gt 0 ]] && ok "$new_folders new folders"
+    [[ "$new_groups" -gt 0 ]] && ok "$new_groups new groups"
+    [[ "$session_merged" == "True" ]] && ok "Session store updated"
+
+    if [[ "$new_spaces" -eq 0 && "$new_tabs" -eq 0 ]]; then
+        dim "  Nothing new to merge"
+    fi
+
+    rm -rf "$tmp_dir"
+
+    printf "\n"
+    $restart && zen_open_local
+
+    printf "\n  ${GREEN}${B}✓ Merge complete${R}\n\n"
+}
+
 # ─── Main ─────────────────────────────────────────────────────────────
 case "${1:-help}" in
     push)   shift; cmd_push "$@" ;;
     pull)   shift; cmd_pull "$@" ;;
+    merge)  shift; cmd_merge "$@" ;;
     status) cmd_status ;;
     init)   cmd_init ;;
     help|--help|-h) usage ;;
