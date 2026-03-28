@@ -7,10 +7,13 @@
   <a href="#install">Install</a> &bull;
   <a href="#usage">Usage</a> &bull;
   <a href="#how-it-works">How it works</a> &bull;
+  <a href="#limitations">Limitations</a> &bull;
   <a href="LICENSE">License</a>
 </p>
 
 ---
+
+> **Linux only** — tested on Arch Linux with Wayland. May work on other distros but is not tested.
 
 Zen Browser doesn't sync spaces or tabs across devices yet. **zen-sync** fills that gap — push your entire browsing session from one machine to another in seconds.
 
@@ -28,13 +31,13 @@ zen-sync init
 
 ### Requirements
 
+- Linux (tested on Arch Linux with Wayland/Hyprland)
 - Zen Browser (same version on both devices)
-- SSH access between devices
+- SSH access between devices (ideally with key-based auth via `ssh-copy-id`)
 - `rsync` (only for `--full` mode)
+- `python3` + `liblz4` (only for `zen-sync status`)
 
 ## Usage
-
-> **Always close Zen Browser on the target device before syncing.**
 
 ```bash
 # Push local session to remote device
@@ -43,6 +46,10 @@ zen-sync push
 # Pull remote session to local device
 zen-sync pull
 
+# Auto-close Zen on target, sync, and reopen it
+zen-sync push --restart
+zen-sync pull --restart
+
 # Compare spaces on both devices
 zen-sync status
 
@@ -50,6 +57,17 @@ zen-sync status
 zen-sync push --full
 zen-sync pull --full
 ```
+
+### Recommended workflow
+
+```bash
+# From your main machine, push to the other:
+zen-sync push --restart
+```
+
+This will close Zen on the remote device, sync the session files, and reopen Zen — all in one command. No need to manually close anything.
+
+Without `--restart`, Zen must be closed on the target device before syncing.
 
 ## How it works
 
@@ -71,6 +89,32 @@ This takes ~10 seconds over a local network.
 ### Full sync (`--full`)
 
 Uses `rsync` to transfer the entire profile directory (excluding caches). Useful for initial setup or when light sync isn't enough — for example, syncing extensions, bookmarks, or passwords that aren't covered by light sync.
+
+## Limitations
+
+> This tool was built for a specific setup and may need adjustments for yours.
+
+**Tested environment:**
+- Arch Linux on both devices (desktop + laptop)
+- Wayland (Hyprland) — the `--restart` flag uses `WAYLAND_DISPLAY=wayland-1`
+- Same username (`enisdev`) on both machines
+- Local network (SSH over LAN)
+
+**Known limitations:**
+- **Linux only** — macOS and Windows store Zen profiles in different locations
+- **Wayland assumption** — the `--restart` reopen uses hardcoded `WAYLAND_DISPLAY=wayland-1`. X11 or different Wayland compositors may need adjustment
+- **Single remote** — only one remote device is supported per config
+- **No conflict resolution** — last push/pull wins. There's no merge logic
+- **No encryption** — files are transferred via SSH (encrypted in transit) but not at rest
+- **Profile paths are fixed after init** — if Zen creates a new profile, re-run `zen-sync init`
+
+**What light sync does NOT transfer:**
+- Bookmarks, passwords, history (use Firefox Sync for these)
+- Extensions and their data
+- Cookies and site storage
+- Cached data
+
+Use `--full` for a complete profile transfer that includes everything above.
 
 ## Good to know
 
