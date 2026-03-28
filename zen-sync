@@ -1,0 +1,237 @@
+#!/bin/bash
+set -euo pipefail
+
+# ─── Config ───────────────────────────────────────────────────────────
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/zen-sync"
+CONFIG_FILE="$CONFIG_DIR/config"
+
+# ─── Helpers ──────────────────────────────────────────────────────────
+die()  { echo "error: $*" >&2; exit 1; }
+info() { echo ":: $*"; }
+warn() { echo "⚠  $*" >&2; }
+
+usage() {
+    cat <<EOF
+zen-sync - sync Zen Browser spaces & tabs across devices
+
+Usage:
+    zen-sync push              Push local session to remote device
+    zen-sync pull              Pull remote session to local device
+    zen-sync push --full       Full profile sync via rsync (slower, more complete)
+    zen-sync pull --full       Full profile pull via rsync
+    zen-sync status            Show spaces on both devices
+    zen-sync init              Configure local and remote profiles
+    zen-sync help              Show this help
+
+Notes:
+    - Zen Browser must be CLOSED on the target device before push/pull
+    - Config is stored in $CONFIG_DIR/config
+EOF
+    exit 0
+}
+
+# ─── Config management ────────────────────────────────────────────────
+load_config() {
+    [[ -f "$CONFIG_FILE" ]] || die "not configured. Run 'zen-sync init' first."
+    source "$CONFIG_FILE"
+    : "${REMOTE_HOST:?}" "${REMOTE_USER:?}" "${LOCAL_PROFILE:?}" "${REMOTE_PROFILE:?}"
+}
+
+find_local_profile() {
+    local zen_dir="$HOME/.zen"
+    [[ -d "$zen_dir" ]] || die "Zen Browser not found (~/.zen does not exist)"
+
+    local profiles=()
+    while IFS= read -r d; do
+        [[ -f "$d/zen-sessions.jsonlz4" ]] && profiles+=("$d")
+    done < <(find "$zen_dir" -maxdepth 1 -type d -name "*.Default (release)" 2>/dev/null)
+
+    if [[ ${#profiles[@]} -eq 0 ]]; then
+        # Try any profile with zen-sessions
+        while IFS= read -r d; do
+            [[ -f "$d/zen-sessions.jsonlz4" ]] && profiles+=("$d")
+        done < <(find "$zen_dir" -maxdepth 1 -type d 2>/dev/null)
+    fi
+
+    [[ ${#profiles[@]} -gt 0 ]] || die "no Zen profile found with zen-sessions.jsonlz4"
+
+    if [[ ${#profiles[@]} -eq 1 ]]; then
+        echo "${profiles[0]}"
+    else
+        echo "Multiple profiles found:" >&2
+        for i in "${!profiles[@]}"; do
+            echo "  [$i] ${profiles[$i]}" >&2
+        done
+        read -rp "Select profile [0]: " choice
+        echo "${profiles[${choice:-0}]}"
+    fi
+}
+
+find_remote_profile() {
+    local host="$1" user="$2"
+    ssh "$user@$host" 'find ~/.zen -maxdepth 1 -type d -name "*.Default (release)" 2>/dev/null | head -1'
+}
+
+cmd_init() {
+    mkdir -p "$CONFIG_DIR"
+
+    info "Zen Sync Setup"
+    echo ""
+
+    # Remote host
+    read -rp "Remote host (IP or hostname): " host
+    read -rp "Remote user [$USER]: " user
+    user="${user:-$USER}"
+
+    # Test SSH
+    info "Testing SSH connection..."
+    ssh -o ConnectTimeout=5 "$user@$host" "echo ok" >/dev/null 2>&1 \
+        || die "cannot connect to $user@$host - check SSH"
+
+    # Find local profile
+    info "Finding local Zen profile..."
+    local local_profile
+    local_profile=$(find_local_profile)
+    info "Local: $local_profile"
+
+    # Find remote profile
+    info "Finding remote Zen profile..."
+    local remote_profile
+    remote_profile=$(ssh "$user@$host" 'find ~/.zen -maxdepth 1 -type d -name "*.Default (release)" 2>/dev/null | head -1')
+    [[ -n "$remote_profile" ]] || die "no Zen profile found on remote"
+    info "Remote: $remote_profile"
+
+    # Write config
+    cat > "$CONFIG_FILE" <<CONF
+REMOTE_HOST="$host"
+REMOTE_USER="$user"
+LOCAL_PROFILE="$local_profile"
+REMOTE_PROFILE="$remote_profile"
+CONF
+
+    info "Config saved to $CONFIG_FILE"
+    echo ""
+    info "Ready! Use 'zen-sync push' or 'zen-sync pull'"
+}
+
+# ─── Sync files list ─────────────────────────────────────────────────
+SYNC_FILES=(
+    "zen-sessions.jsonlz4"
+    "zen-sessions-backup/clean.jsonlz4"
+    "sessionstore-backups/recovery.jsonlz4"
+    "sessionstore-backups/recovery.baklz4"
+    "sessionstore-backups/previous.jsonlz4"
+    "prefs.js"
+    "containers.json"
+)
+
+RSYNC_EXCLUDES=(
+    "cache2/"
+    "startupCache/"
+    "shader-cache/"
+    "thumbnails/"
+    "safebrowsing/"
+    "datareporting/"
+    "crashes/"
+    "minidumps/"
+    "storage/default/*/cache/"
+)
+
+# ─── Push ─────────────────────────────────────────────────────────────
+cmd_push() {
+    load_config
+    local full=false
+    [[ "${1:-}" == "--full" ]] && full=true
+
+    local remote="$REMOTE_USER@$REMOTE_HOST"
+
+    if $full; then
+        info "Full sync -> $remote"
+        local excludes=()
+        for e in "${RSYNC_EXCLUDES[@]}"; do
+            excludes+=(--exclude="$e")
+        done
+        rsync -avz --progress --delete "${excludes[@]}" \
+            "$LOCAL_PROFILE/" "$remote:$REMOTE_PROFILE/"
+    else
+        info "Light sync -> $remote"
+        for f in "${SYNC_FILES[@]}"; do
+            local src="$LOCAL_PROFILE/$f"
+            if [[ -f "$src" ]]; then
+                scp -q "$src" "$remote:$REMOTE_PROFILE/$f" && echo "  ✓ $f" || warn "  ✗ $f"
+            fi
+        done
+    fi
+
+    info "Done!"
+}
+
+# ─── Pull ─────────────────────────────────────────────────────────────
+cmd_pull() {
+    load_config
+    local full=false
+    [[ "${1:-}" == "--full" ]] && full=true
+
+    local remote="$REMOTE_USER@$REMOTE_HOST"
+
+    if $full; then
+        info "Full pull <- $remote"
+        local excludes=()
+        for e in "${RSYNC_EXCLUDES[@]}"; do
+            excludes+=(--exclude="$e")
+        done
+        rsync -avz --progress --delete "${excludes[@]}" \
+            "$remote:$REMOTE_PROFILE/" "$LOCAL_PROFILE/"
+    else
+        info "Light pull <- $remote"
+        for f in "${SYNC_FILES[@]}"; do
+            local dst="$LOCAL_PROFILE/$f"
+            scp -q "$remote:$REMOTE_PROFILE/$f" "$dst" 2>/dev/null && echo "  ✓ $f" || warn "  ✗ $f (not found)"
+        done
+    fi
+
+    info "Done!"
+}
+
+# ─── Status ───────────────────────────────────────────────────────────
+read_spaces() {
+    python3 -c "
+import ctypes, json, struct, sys
+lib = ctypes.CDLL('liblz4.so.1')
+with open(sys.argv[1], 'rb') as f:
+    data = f.read()
+size = struct.unpack('<I', data[8:12])[0]
+dst = ctypes.create_string_buffer(size)
+lib.LZ4_decompress_safe(data[12:], dst, len(data)-12, size)
+j = json.loads(dst.raw[:size])
+print(f'{len(j[\"spaces\"])} spaces, {len(j[\"tabs\"])} tabs')
+for s in sorted(j['spaces'], key=lambda x: x.get('position', 99999)):
+    print(f'  {s.get(\"position\",\"?\"):>5}  {s[\"name\"]}')
+" "$1"
+}
+
+cmd_status() {
+    load_config
+    local remote="$REMOTE_USER@$REMOTE_HOST"
+
+    echo "LOCAL ($LOCAL_PROFILE):"
+    read_spaces "$LOCAL_PROFILE/zen-sessions.jsonlz4"
+
+    echo ""
+    echo "REMOTE ($REMOTE_HOST:$REMOTE_PROFILE):"
+    local tmp=$(mktemp)
+    scp -q "$remote:$REMOTE_PROFILE/zen-sessions.jsonlz4" "$tmp" 2>/dev/null \
+        && read_spaces "$tmp" \
+        || warn "could not read remote sessions"
+    rm -f "$tmp"
+}
+
+# ─── Main ─────────────────────────────────────────────────────────────
+case "${1:-help}" in
+    push)   cmd_push "${2:-}" ;;
+    pull)   cmd_pull "${2:-}" ;;
+    status) cmd_status ;;
+    init)   cmd_init ;;
+    help|--help|-h) usage ;;
+    *)      die "unknown command: $1. Run 'zen-sync help'" ;;
+esac
