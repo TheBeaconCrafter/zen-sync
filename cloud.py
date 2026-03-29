@@ -202,7 +202,7 @@ def cmd_push(config, profile_path, files):
         "files": files,
         "size": len(archive),
     }).encode()
-    encrypted_meta = encrypt_age(meta, config["age_key_path"])
+    encrypted_meta = encrypt_age(meta, config)
     r2_request("PUT", "meta.json.age", encrypted_meta, config)
 
     return len(archive), len(encrypted)
@@ -213,7 +213,7 @@ def cmd_pull(config, profile_path, files):
     encrypted = r2_request("GET", "session.tar.gz.age", None, config)
     if encrypted is None:
         return None
-    archive = decrypt_age(encrypted, config["age_key_path"])
+    archive = decrypt_age(encrypted, config)
     unpack_files(archive, profile_path)
     return len(archive)
 
@@ -223,7 +223,7 @@ def cmd_status(config):
     encrypted = r2_request("GET", "meta.json.age", None, config)
     if encrypted is None:
         return None
-    meta = decrypt_age(encrypted, config["age_key_path"])
+    meta = decrypt_age(encrypted, config)
     return json.loads(meta)
 
 
