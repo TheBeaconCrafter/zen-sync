@@ -84,9 +84,9 @@ During `zen-sync init`, you choose how devices communicate:
 
 ## Usage
 
-> **Zen must be closed on the target device before syncing.**
-> The target will overwrite synced files if Zen is still open. Use `--restart` to handle this automatically.
-> Zen on the source side can stay open, session files are auto-saved every ~15 seconds.
+> **Before pushing**, close Zen on the other device (or use `--restart`).
+> **Before pulling**, close Zen on your device (or use `--restart`).
+> Zen writes session files when it closes. If it's still open, it will overwrite your sync.
 
 | Situation                   | Command                    |
 | --------------------------- | -------------------------- |
