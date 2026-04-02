@@ -9,6 +9,7 @@ if errorlevel 1 (
 )
 
 pushd "%~dp0"
+set "ZEN_SYNC_LIB_DIR=%USERPROFILE%\.local\lib\zen-sync"
 bash ./zen-sync %*
 set "EXIT_CODE=%ERRORLEVEL%"
 popd

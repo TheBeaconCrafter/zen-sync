@@ -11,6 +11,9 @@ Invoke-WebRequest -Uri "$repoBase/zen-sync" -OutFile (Join-Path $binDir "zen-syn
 Invoke-WebRequest -Uri "$repoBase/merge.py" -OutFile (Join-Path $libDir "merge.py")
 Invoke-WebRequest -Uri "$repoBase/cloud.py" -OutFile (Join-Path $libDir "cloud.py")
 Invoke-WebRequest -Uri "$repoBase/storagebox.py" -OutFile (Join-Path $libDir "storagebox.py")
+Invoke-WebRequest -Uri "$repoBase/merge.py" -OutFile (Join-Path $binDir "merge.py")
+Invoke-WebRequest -Uri "$repoBase/cloud.py" -OutFile (Join-Path $binDir "cloud.py")
+Invoke-WebRequest -Uri "$repoBase/storagebox.py" -OutFile (Join-Path $binDir "storagebox.py")
 
 $cmd = @'
 @echo off
@@ -24,6 +27,7 @@ if errorlevel 1 (
 )
 
 pushd "%~dp0"
+set "ZEN_SYNC_LIB_DIR=%USERPROFILE%\.local\lib\zen-sync"
 bash ./zen-sync %*
 set "EXIT_CODE=%ERRORLEVEL%"
 popd

@@ -210,12 +210,46 @@ resolve_script_dir() {
 SCRIPT_DIR="$(resolve_script_dir)"
 PYTHON_BIN="$(detect_python)"
 
+path_to_unix_lookup() {
+    local raw="$1"
+    [[ -n "$raw" ]] || return 0
+
+    if [[ "$raw" =~ ^([A-Za-z]):\\(.*)$ ]]; then
+        local drive="${BASH_REMATCH[1],,}"
+        local rest="${BASH_REMATCH[2]//\\//}"
+        if [[ -d "/mnt/$drive" ]]; then
+            printf '/mnt/%s/%s\n' "$drive" "$rest"
+        else
+            printf '/%s/%s\n' "$drive" "$rest"
+        fi
+        return 0
+    fi
+
+    echo "$raw"
+}
+
 find_py() {
     local name="$1"
     local path="$SCRIPT_DIR/$name"
     [[ -f "$path" ]] && { echo "$path"; return; }
+
+    if [[ -n "${ZEN_SYNC_LIB_DIR:-}" ]]; then
+        path="$(path_to_unix_lookup "$ZEN_SYNC_LIB_DIR")/$name"
+        [[ -f "$path" ]] && { echo "$path"; return; }
+    fi
+
     path="$HOME/.local/lib/zen-sync/$name"
     [[ -f "$path" ]] && { echo "$path"; return; }
+
+    if command -v cmd.exe >/dev/null 2>&1; then
+        local userprofile
+        userprofile=$(cmd.exe /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r' | tail -n 1)
+        if [[ -n "$userprofile" && "$userprofile" != *"%USERPROFILE%"* ]]; then
+            path="$(path_to_unix_lookup "$userprofile")/.local/lib/zen-sync/$name"
+            [[ -f "$path" ]] && { echo "$path"; return; }
+        fi
+    fi
+
     die "$name not found. Re-run install."
 }
 
