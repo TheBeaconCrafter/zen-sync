@@ -42,6 +42,7 @@ usage() {
     printf "    ${WHITE}zen-sync${R} ${GREEN}pull${R}              ${D}Pull session from remote${R}\n"
     printf "    ${WHITE}zen-sync${R} ${GREEN}merge${R}             ${D}Merge remote tabs into local${R}\n"
     printf "    ${WHITE}zen-sync${R} ${GREEN}push --restart${R}    ${D}Close Zen, sync, reopen${R}\n"
+    printf "    ${WHITE}zen-sync${R} ${GREEN}extract-key${R}       ${D}Export age key file (R2/StorageBox key mode)${R}\n"
     printf "    ${WHITE}zen-sync${R} ${YELLOW}status${R}            ${D}Compare both devices${R}\n"
     printf "    ${WHITE}zen-sync${R} ${YELLOW}init${R}              ${D}Setup wizard${R}\n"
     printf "\n"
@@ -353,9 +354,9 @@ find_local_profile() {
     add_profile() {
         local p="$1"
         [[ -n "$p" ]] || return 0
-        case "\n$seen\n" in
-            *"\n$p\n"*) return 0 ;;
-        esac
+        if [[ -n "$seen" ]] && printf '%s' "$seen" | grep -Fqx -- "$p"; then
+            return 0
+        fi
         profiles+=("$p")
         seen+="$p"$'\n'
     }
@@ -379,7 +380,12 @@ find_local_profile() {
     done
 
     if [[ ${#profiles[@]} -gt 0 ]]; then
-        mapfile -t profiles < <(printf '%s\n' "${profiles[@]}" | awk 'NF && !seen[$0]++')
+        local unique_profiles=()
+        local p
+        while IFS= read -r p; do
+            [[ -n "$p" ]] && unique_profiles+=("$p")
+        done < <(printf '%s\n' "${profiles[@]}" | awk 'NF && !seen[$0]++')
+        profiles=("${unique_profiles[@]}")
     fi
 
     [[ ${#profiles[@]} -gt 0 ]] || die "no Zen profile found with zen-sessions.jsonlz4 (checked Linux/macOS/Windows paths, including %APPDATA%/zen/Profiles)"
@@ -530,10 +536,16 @@ init_r2() {
     printf "  ${WHITE}Encryption method:${R}\n\n"
     printf "    ${PURPLE}❯${R} ${GREEN}1${R}  ${B}Passphrase${R}   ${D}Same passphrase on all devices (recommended)${R}\n"
     printf "    ${PURPLE}❯${R} ${GREEN}2${R}  ${B}Key file${R}     ${D}Generate key, copy to other devices${R}\n"
+    printf "    ${PURPLE}❯${R} ${GREEN}3${R}  ${B}Import key${R}   ${D}Use an existing age key file${R}\n"
     printf "\n"
     prompt "Encryption" "1"; read -r enc_choice
     local enc_mode="passphrase"
+    local import_existing_key="false"
     [[ "$enc_choice" == "2" ]] && enc_mode="keyfile"
+    if [[ "$enc_choice" == "3" ]]; then
+        enc_mode="keyfile"
+        import_existing_key="true"
+    fi
 
     if [[ "$enc_mode" == "passphrase" && "$age_bin" == *.exe ]]; then
         dim "  Passphrase mode is unreliable with Windows age.exe in this shell."
@@ -628,9 +640,16 @@ init_storagebox() {
     local test_config
     test_config=$(printf '{"url":"%s","username":"%s","password":"%s","path":"%s"}' \
         "$storage_url" "$storage_user" "$storage_pass" "$storage_path")
-    if "$PYTHON_BIN" "$storage_py" test "$test_config" >/dev/null 2>&1; then
+    local test_output
+    if test_output=$("$PYTHON_BIN" "$storage_py" test "$test_config" 2>&1); then
         ok "Storage Box connected"
     else
+        if [[ -n "$test_output" ]]; then
+            dim "  backend error:"
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && dim "  $line"
+            done <<< "$test_output"
+        fi
         die "could not connect to Storage Box. Check URL, username, password, and path."
     fi
 
@@ -638,10 +657,16 @@ init_storagebox() {
     printf "  ${WHITE}Encryption method:${R}\n\n"
     printf "    ${PURPLE}❯${R} ${GREEN}1${R}  ${B}Passphrase${R}   ${D}Same passphrase on all devices (recommended)${R}\n"
     printf "    ${PURPLE}❯${R} ${GREEN}2${R}  ${B}Key file${R}     ${D}Generate key, copy to other devices${R}\n"
+    printf "    ${PURPLE}❯${R} ${GREEN}3${R}  ${B}Import key${R}   ${D}Use an existing age key file${R}\n"
     printf "\n"
     prompt "Encryption" "1"; read -r enc_choice
     local enc_mode="passphrase"
+    local import_existing_key="false"
     [[ "$enc_choice" == "2" ]] && enc_mode="keyfile"
+    if [[ "$enc_choice" == "3" ]]; then
+        enc_mode="keyfile"
+        import_existing_key="true"
+    fi
 
     if [[ "$enc_mode" == "passphrase" && "$age_bin" == *.exe ]]; then
         dim "  Passphrase mode is unreliable with Windows age.exe in this shell."
@@ -674,7 +699,20 @@ AGE_KEYGEN_BIN="$age_keygen_bin"
 LOCAL_PROFILE="$local_profile"
 CONF
     else
-        if [[ -f "$age_key" ]]; then
+        if [[ "$import_existing_key" == "true" ]]; then
+            local source_key
+            prompt "Path to existing age key file"; read -r source_key
+            source_key="${source_key/#\~/$HOME}"
+            [[ -n "$source_key" ]] || die "key file path cannot be empty"
+            [[ -f "$source_key" ]] || die "age key file not found: $source_key"
+
+            mkdir -p "$(dirname "$age_key")"
+            if [[ "$source_key" != "$age_key" ]]; then
+                cp "$source_key" "$age_key" || die "failed to copy age key from $source_key"
+            fi
+            chmod 600 "$age_key"
+            ok "Imported age key to $age_key"
+        elif [[ -f "$age_key" ]]; then
             ok "Using existing age key"
         else
             step "  🔑" "Generating age encryption key..."
@@ -959,6 +997,42 @@ cmd_status() {
     printf "\n"
 }
 
+cmd_extract_key() {
+    load_config
+
+    [[ "$#" -le 1 ]] || die "usage: zen-sync extract-key [output-file]"
+    [[ "$MODE" == "r2" || "$MODE" == "storagebox" ]] || die "extract-key is only available in r2 or storagebox mode"
+    [[ "${AGE_MODE:-keyfile}" == "keyfile" ]] || die "current config uses passphrase mode, no key file to extract"
+
+    local source_key
+    source_key="${AGE_KEY_PATH/#\~/$HOME}"
+    [[ -n "$source_key" ]] || die "AGE_KEY_PATH is missing in config"
+    [[ -f "$source_key" ]] || die "age key file not found: $source_key"
+
+    local output_path
+    output_path="${1:-$PWD/zen-sync-age-key-$(date +%Y%m%d-%H%M%S).txt}"
+    output_path="${output_path/#\~/$HOME}"
+
+    header "extract-key"
+
+    if [[ "$source_key" == "$output_path" ]]; then
+        chmod 600 "$output_path" 2>/dev/null || true
+        ok "Key already at $output_path"
+        printf "\n"
+        return 0
+    fi
+
+    [[ ! -e "$output_path" ]] || die "output file already exists: $output_path"
+
+    mkdir -p "$(dirname "$output_path")"
+    cp "$source_key" "$output_path" || die "failed to export key to $output_path"
+    chmod 600 "$output_path"
+
+    ok "Key extracted to $output_path"
+    dim "  Keep this file private. Anyone with it can decrypt your synced archive."
+    printf "\n"
+}
+
 # ─── Merge ────────────────────────────────────────────────────────────
 cmd_merge() {
     load_config
@@ -1048,6 +1122,7 @@ case "${1:-help}" in
     push)   shift; cmd_push "$@" ;;
     pull)   shift; cmd_pull "$@" ;;
     merge)  shift; cmd_merge "$@" ;;
+    extract-key) shift; cmd_extract_key "$@" ;;
     status) cmd_status ;;
     init)   cmd_init ;;
     help|--help|-h) usage ;;
