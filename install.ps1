@@ -23,8 +23,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-bash "%~dp0zen-sync" %*
-exit /b %ERRORLEVEL%
+pushd "%~dp0"
+bash ./zen-sync %*
+set "EXIT_CODE=%ERRORLEVEL%"
+popd
+exit /b %EXIT_CODE%
 '@
 Set-Content -Path (Join-Path $binDir "zen-sync.cmd") -Value $cmd -Encoding ascii
 
