@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import socket
 import subprocess
 import sys
 import tarfile
@@ -13,6 +14,14 @@ from datetime import datetime, timezone
 from io import BytesIO
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
+
+
+def _age_bin(config):
+    return config.get("age_bin") or "age"
+
+
+def _age_keygen_bin(config):
+    return config.get("age_keygen_bin") or "age-keygen"
 
 
 def sign_aws_v4(method, url, headers, payload, region, service, access_key, secret_key):
@@ -102,22 +111,30 @@ def r2_request(method, key, data, config):
 def encrypt_age(data, config):
     """Encrypt data with age."""
     age_mode = config.get("age_mode", "keyfile")
+    age_bin = _age_bin(config)
 
     if age_mode == "passphrase":
         passphrase_path = os.path.join(config.get("config_dir", os.path.expanduser("~/.config/zen-sync")), "passphrase")
         passphrase_path = os.path.expanduser(passphrase_path)
         with open(passphrase_path) as f:
             passphrase = f.read().strip()
-        proc = subprocess.run(
-            ["age", "-p"],
-            input=data, capture_output=True,
-            env={**os.environ, "AGE_PASSPHRASE": passphrase}
-        )
+        try:
+            proc = subprocess.run(
+                [age_bin, "-p"],
+                input=data, capture_output=True,
+                env={**os.environ, "AGE_PASSPHRASE": passphrase},
+                timeout=20,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                "age passphrase mode timed out (likely waiting for interactive input). "
+                "Re-run init and choose key file mode."
+            ) from exc
     else:
         key_path = os.path.expanduser(config["age_key_path"])
         # Get public key from secret key
         result = subprocess.run(
-            ["age-keygen", "-y", key_path],
+            [_age_keygen_bin(config), "-y", key_path],
             capture_output=True, text=True
         )
         if result.returncode != 0:
@@ -132,7 +149,7 @@ def encrypt_age(data, config):
             recipient = result.stdout.strip()
 
         proc = subprocess.run(
-            ["age", "-r", recipient],
+            [age_bin, "-r", recipient],
             input=data, capture_output=True
         )
 
@@ -144,21 +161,29 @@ def encrypt_age(data, config):
 def decrypt_age(data, config):
     """Decrypt data with age."""
     age_mode = config.get("age_mode", "keyfile")
+    age_bin = _age_bin(config)
 
     if age_mode == "passphrase":
         passphrase_path = os.path.join(config.get("config_dir", os.path.expanduser("~/.config/zen-sync")), "passphrase")
         passphrase_path = os.path.expanduser(passphrase_path)
         with open(passphrase_path) as f:
             passphrase = f.read().strip()
-        proc = subprocess.run(
-            ["age", "-d"],
-            input=data, capture_output=True,
-            env={**os.environ, "AGE_PASSPHRASE": passphrase}
-        )
+        try:
+            proc = subprocess.run(
+                [age_bin, "-d"],
+                input=data, capture_output=True,
+                env={**os.environ, "AGE_PASSPHRASE": passphrase},
+                timeout=20,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                "age passphrase mode timed out (likely waiting for interactive input). "
+                "Re-run init and choose key file mode."
+            ) from exc
     else:
         key_path = os.path.expanduser(config["age_key_path"])
         proc = subprocess.run(
-            ["age", "-d", "-i", key_path],
+            [age_bin, "-d", "-i", key_path],
             input=data, capture_output=True
         )
 
@@ -198,7 +223,7 @@ def cmd_push(config, profile_path, files):
     # Also upload a metadata file
     meta = json.dumps({
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "hostname": os.uname().nodename,
+        "hostname": socket.gethostname(),
         "files": files,
         "size": len(archive),
     }).encode()

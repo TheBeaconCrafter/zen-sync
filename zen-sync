@@ -45,18 +45,88 @@ usage() {
     printf "    ${WHITE}zen-sync${R} ${YELLOW}status${R}            ${D}Compare both devices${R}\n"
     printf "    ${WHITE}zen-sync${R} ${YELLOW}init${R}              ${D}Setup wizard${R}\n"
     printf "\n"
-    printf "  ${D}Modes: ssh (direct device-to-device) or r2 (Cloudflare R2 cloud)${R}\n"
+    printf "  ${D}Modes: ssh (device-to-device), r2 (Cloudflare R2), storagebox (WebDAV)${R}\n"
     printf "  ${D}Config: %s${R}\n" "$CONFIG_DIR/config"
     printf "\n"
     exit 0
 }
 
+detect_python() {
+    if command -v python3 >/dev/null 2>&1; then
+        echo "python3"
+    elif command -v python >/dev/null 2>&1; then
+        echo "python"
+    else
+        die "python not found in PATH"
+    fi
+}
+
+resolve_tool_path() {
+    local name="$1"
+    if command -v "$name" >/dev/null 2>&1; then
+        command -v "$name"
+        return 0
+    fi
+    if command -v "${name}.exe" >/dev/null 2>&1; then
+        command -v "${name}.exe"
+        return 0
+    fi
+    if command -v cmd.exe >/dev/null 2>&1; then
+        local win_path
+        win_path=$(cmd.exe /c "where $name" 2>/dev/null | tr -d '\r' | head -n 1)
+        if [[ -n "$win_path" ]]; then
+            to_unix_path "$win_path"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+resolve_age_keygen() {
+    local age_bin="$1"
+    local keygen_bin=""
+
+    keygen_bin=$(resolve_tool_path "age-keygen" || true)
+    if [[ -n "$keygen_bin" ]]; then
+        echo "$keygen_bin"
+        return 0
+    fi
+
+    # Try sibling binary next to age (common on Windows winget installs).
+    local dir
+    dir="$(dirname "$age_bin")"
+    if [[ -f "$dir/age-keygen.exe" ]]; then
+        echo "$dir/age-keygen.exe"
+        return 0
+    fi
+    if [[ -f "$dir/age-keygen" ]]; then
+        echo "$dir/age-keygen"
+        return 0
+    fi
+
+    return 1
+}
+
+human_bytes() {
+    local bytes="${1:-0}"
+    local units=(B KiB MiB GiB TiB)
+    local i=0
+    local value="$bytes"
+
+    while [[ "$value" -ge 1024 && "$i" -lt 4 ]]; do
+        value=$((value / 1024))
+        i=$((i + 1))
+    done
+
+    echo "${value}${units[$i]}"
+}
+
 # ─── Zen process management ──────────────────────────────────────────
 zen_close_remote() {
     local remote="$1"
-    if ssh "$remote" 'pgrep -x zen-bin >/dev/null 2>&1'; then
+    if ssh "$remote" 'pgrep -f "zen-bin|zen-browser|Zen Browser|zen.exe" >/dev/null 2>&1'; then
         step "  ◼" "Closing Zen on remote..."
-        ssh -o ConnectTimeout=5 "$remote" 'kill -SIGTERM $(pgrep -x zen-bin | head -1) 2>/dev/null; exit 0' || true
+        ssh -o ConnectTimeout=5 "$remote" 'pkill -f "zen-bin|zen-browser|Zen Browser|zen.exe" 2>/dev/null || true; exit 0' || true
         sleep 5
     fi
 }
@@ -64,12 +134,21 @@ zen_close_remote() {
 zen_open_remote() {
     local remote="$1"
     step "  ▶" "Reopening Zen on remote..."
-    ssh "$remote" 'WAYLAND_DISPLAY=wayland-1 DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/$(id -u) nohup zen-browser >/dev/null 2>&1 </dev/null &; exit 0' || true
+    ssh "$remote" '
+        if command -v zen-browser >/dev/null 2>&1; then
+            nohup zen-browser >/dev/null 2>&1 </dev/null &
+        elif command -v open >/dev/null 2>&1; then
+            open -a "Zen Browser" >/dev/null 2>&1 || open -a "Zen" >/dev/null 2>&1 || true
+        elif command -v cmd.exe >/dev/null 2>&1; then
+            cmd.exe /c start "" zen.exe >/dev/null 2>&1 || true
+        fi
+        exit 0
+    ' || true
 }
 
 zen_close_local() {
     local pids
-    pids=$(pgrep -x zen-bin 2>/dev/null || true)
+    pids=$(pgrep -f "zen-bin|zen-browser|Zen Browser|zen.exe" 2>/dev/null || true)
     if [[ -n "$pids" ]]; then
         step "  ◼" "Closing Zen locally..."
         kill -SIGTERM $(echo "$pids" | head -1) 2>/dev/null || true
@@ -79,7 +158,13 @@ zen_close_local() {
 
 zen_open_local() {
     step "  ▶" "Reopening Zen locally..."
-    nohup zen-browser >/dev/null 2>&1 &
+    if command -v zen-browser >/dev/null 2>&1; then
+        nohup zen-browser >/dev/null 2>&1 &
+    elif command -v open >/dev/null 2>&1; then
+        open -a "Zen Browser" >/dev/null 2>&1 || open -a "Zen" >/dev/null 2>&1 || true
+    elif command -v cmd.exe >/dev/null 2>&1; then
+        cmd.exe /c start "" zen.exe >/dev/null 2>&1 || true
+    fi
 }
 
 # ─── Resolve script directory ────────────────────────────────────────
@@ -94,6 +179,7 @@ resolve_script_dir() {
 }
 
 SCRIPT_DIR="$(resolve_script_dir)"
+PYTHON_BIN="$(detect_python)"
 
 find_py() {
     local name="$1"
@@ -117,32 +203,186 @@ load_config() {
         if [[ "${AGE_MODE:-keyfile}" == "keyfile" ]]; then
             : "${AGE_KEY_PATH:?}"
         fi
+    elif [[ "$MODE" == "storagebox" ]]; then
+        : "${STORAGEBOX_URL:?}" "${STORAGEBOX_USER:?}" "${STORAGEBOX_PASS:?}" "${STORAGEBOX_PATH:?}"
+        if [[ "${AGE_MODE:-keyfile}" == "keyfile" ]]; then
+            : "${AGE_KEY_PATH:?}"
+        fi
     else
         die "unknown mode: $MODE"
     fi
 }
 
 cloud_config_json() {
-    printf '{"account_id":"%s","access_key":"%s","secret_key":"%s","bucket":"%s","age_key_path":"%s","age_mode":"%s","config_dir":"%s","profile":"%s"}' \
-        "$R2_ACCOUNT_ID" "$R2_ACCESS_KEY" "$R2_SECRET_KEY" "$R2_BUCKET" "${AGE_KEY_PATH:-}" "${AGE_MODE:-keyfile}" "$CONFIG_DIR" "$LOCAL_PROFILE"
+    printf '{"account_id":"%s","access_key":"%s","secret_key":"%s","bucket":"%s","age_key_path":"%s","age_mode":"%s","config_dir":"%s","profile":"%s","age_bin":"%s","age_keygen_bin":"%s"}' \
+        "$R2_ACCOUNT_ID" "$R2_ACCESS_KEY" "$R2_SECRET_KEY" "$R2_BUCKET" "${AGE_KEY_PATH:-}" "${AGE_MODE:-keyfile}" "$CONFIG_DIR" "$LOCAL_PROFILE" "${AGE_BIN:-age}" "${AGE_KEYGEN_BIN:-age-keygen}"
+}
+
+storagebox_config_json() {
+    printf '{"url":"%s","username":"%s","password":"%s","path":"%s","age_key_path":"%s","age_mode":"%s","config_dir":"%s","profile":"%s","age_bin":"%s","age_keygen_bin":"%s"}' \
+        "$STORAGEBOX_URL" "$STORAGEBOX_USER" "$STORAGEBOX_PASS" "$STORAGEBOX_PATH" "${AGE_KEY_PATH:-}" "${AGE_MODE:-keyfile}" "$CONFIG_DIR" "$LOCAL_PROFILE" "${AGE_BIN:-age}" "${AGE_KEYGEN_BIN:-age-keygen}"
+}
+
+to_unix_path() {
+    local raw="$1"
+    [[ -n "$raw" ]] || return 0
+
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -u "$raw" 2>/dev/null && return 0
+    fi
+
+    # Fallback for Git Bash/WSL environments where APPDATA is a Windows path.
+    local norm="${raw//\\//}"
+    if [[ "$norm" =~ ^([A-Za-z]):(.*)$ ]]; then
+        local drive="${BASH_REMATCH[1],,}"
+        local rest="${BASH_REMATCH[2]}"
+        if [[ -d "/mnt/$drive" ]]; then
+            printf '/mnt/%s%s\n' "$drive" "$rest"
+        else
+            printf '/%s%s\n' "$drive" "$rest"
+        fi
+    else
+        printf '%s\n' "$norm"
+    fi
+}
+
+to_windows_path() {
+    local raw="$1"
+    [[ -n "$raw" ]] || return 0
+
+    if command -v wslpath >/dev/null 2>&1; then
+        wslpath -w "$raw" 2>/dev/null && return 0
+    fi
+
+    local norm="${raw//\\//}"
+    if [[ "$norm" =~ ^/mnt/([A-Za-z])/(.*)$ ]]; then
+        local drive="${BASH_REMATCH[1]^}"
+        local rest="${BASH_REMATCH[2]//\//\\}"
+        printf '%s:\\%s\n' "$drive" "$rest"
+        return 0
+    fi
+    if [[ "$norm" =~ ^/([A-Za-z])/(.*)$ ]]; then
+        local drive="${BASH_REMATCH[1]^}"
+        local rest="${BASH_REMATCH[2]//\//\\}"
+        printf '%s:\\%s\n' "$drive" "$rest"
+        return 0
+    fi
+
+    printf '%s\n' "$raw"
+}
+
+generate_age_key() {
+    local keygen_bin="$1"
+    local age_key="$2"
+
+    if [[ "$keygen_bin" == *.exe ]] && command -v cmd.exe >/dev/null 2>&1; then
+        local age_key_win
+        age_key_win=$(to_windows_path "$age_key")
+
+        # First try direct execution from bash/WSL with a Windows-style output path.
+        if "$keygen_bin" -o "$age_key_win"; then
+            return 0
+        fi
+
+        # Fallback to cmd.exe invocation with cmd-friendly quoting.
+        local keygen_win
+        keygen_win=$(to_windows_path "$keygen_bin")
+        cmd.exe /d /s /c "\"\"$keygen_win\" -o \"$age_key_win\"\"" || return 1
+    else
+        "$keygen_bin" -o "$age_key" || return 1
+    fi
+}
+
+default_age_key_path() {
+    local age_bin="$1"
+
+    if [[ "$age_bin" == *.exe ]]; then
+        local win_appdata
+        win_appdata=$(windows_appdata_dir)
+        if [[ -n "$win_appdata" ]]; then
+            echo "$win_appdata/zen-sync/age-key.txt"
+            return 0
+        fi
+    fi
+
+    echo "$CONFIG_DIR/age-key.txt"
+}
+
+find_windows_profiles_via_cmd() {
+    command -v cmd.exe >/dev/null 2>&1 || return 0
+
+    local rows
+    rows=$(cmd.exe /c "for /d %P in (\"%APPDATA%\\zen\\Profiles\\*\") do @if exist \"%P\\zen-sessions.jsonlz4\" echo %P" 2>/dev/null | tr -d '\r')
+    [[ -n "$rows" ]] || return 0
+
+    while IFS= read -r win_path; do
+        [[ -n "$win_path" ]] || continue
+        to_unix_path "$win_path"
+    done <<< "$rows"
+}
+
+windows_appdata_dir() {
+    local raw="${APPDATA:-}"
+    if [[ -z "$raw" ]] && command -v cmd.exe >/dev/null 2>&1; then
+        raw=$(cmd.exe /c "echo %APPDATA%" 2>/dev/null | tr -d '\r' | tail -n 1)
+    fi
+
+    # Skip unresolved placeholder values like %APPDATA%.
+    if [[ -z "$raw" || "$raw" == *"%APPDATA%"* ]]; then
+        return 0
+    fi
+
+    to_unix_path "$raw"
 }
 
 find_local_profile() {
-    local zen_dir="$HOME/.zen"
-    [[ -d "$zen_dir" ]] || die "Zen Browser not found (~/.zen does not exist)"
+    local win_appdata=""
+    win_appdata=$(windows_appdata_dir)
 
+    local candidates=(
+        "$HOME/.zen"
+        "$HOME/Library/Application Support/zen"
+        "${APPDATA:-$HOME/AppData/Roaming}/zen"
+        "$HOME/AppData/Roaming/zen"
+        "$win_appdata/zen"
+        "$win_appdata/zen/Profiles"
+    )
     local profiles=()
-    while IFS= read -r d; do
-        [[ -f "$d/zen-sessions.jsonlz4" ]] && profiles+=("$d")
-    done < <(find "$zen_dir" -maxdepth 1 -type d -name "*.Default (release)" 2>/dev/null)
+    local seen=""
 
-    if [[ ${#profiles[@]} -eq 0 ]]; then
+    add_profile() {
+        local p="$1"
+        [[ -n "$p" ]] || return 0
+        case "\n$seen\n" in
+            *"\n$p\n"*) return 0 ;;
+        esac
+        profiles+=("$p")
+        seen+="$p"$'\n'
+    }
+
+    # On Windows hosts, query cmd directly for authoritative profile paths.
+    while IFS= read -r d; do
+        [[ -n "$d" && -f "$d/zen-sessions.jsonlz4" ]] && add_profile "$d"
+    done < <(find_windows_profiles_via_cmd)
+
+    local base
+    for base in "${candidates[@]}"; do
+        [[ -d "$base" ]] || continue
+
         while IFS= read -r d; do
-            [[ -f "$d/zen-sessions.jsonlz4" ]] && profiles+=("$d")
-        done < <(find "$zen_dir" -maxdepth 1 -type d 2>/dev/null)
+            [[ -f "$d/zen-sessions.jsonlz4" ]] && add_profile "$d"
+        done < <(find "$base" -maxdepth 3 -type d \( -name "*.Default (release)" -o -name "*.default-release" \) 2>/dev/null)
+
+        while IFS= read -r d; do
+            [[ -f "$d/zen-sessions.jsonlz4" ]] && add_profile "$d"
+        done < <(find "$base" -maxdepth 3 -type d 2>/dev/null)
+    done
+
+    if [[ ${#profiles[@]} -gt 0 ]]; then
+        mapfile -t profiles < <(printf '%s\n' "${profiles[@]}" | awk 'NF && !seen[$0]++')
     fi
 
-    [[ ${#profiles[@]} -gt 0 ]] || die "no Zen profile found with zen-sessions.jsonlz4"
+    [[ ${#profiles[@]} -gt 0 ]] || die "no Zen profile found with zen-sessions.jsonlz4 (checked Linux/macOS/Windows paths, including %APPDATA%/zen/Profiles)"
 
     if [[ ${#profiles[@]} -eq 1 ]]; then
         echo "${profiles[0]}"
@@ -168,9 +408,16 @@ prompt() {
 
 secret_prompt() {
     local label="$1"
-    printf "  ${PURPLE}›${R} ${WHITE}%s${R} " "$label"
-    read -rs val
-    printf "\n"
+    local val=""
+    printf "  ${PURPLE}›${R} ${WHITE}%s${R} ${D}(hidden)${R} " "$label" >&2
+
+    if [[ -r /dev/tty ]]; then
+        IFS= read -r -s val < /dev/tty
+    else
+        IFS= read -r -s val
+    fi
+
+    printf "\n" >&2
     echo "$val"
 }
 
@@ -181,11 +428,13 @@ cmd_init() {
     printf "  ${WHITE}Choose sync mode:${R}\n\n"
     printf "    ${PURPLE}❯${R} ${GREEN}1${R}  ${B}SSH${R}   ${D}Direct device-to-device (same network)${R}\n"
     printf "    ${PURPLE}❯${R} ${GREEN}2${R}  ${B}R2${R}    ${D}Cloudflare R2 cloud (works anywhere)${R}\n"
+    printf "    ${PURPLE}❯${R} ${GREEN}3${R}  ${B}Storage Box${R} ${D}WebDAV (Hetzner-style remote storage)${R}\n"
     printf "\n"
     prompt "Mode" "1"
     read -r mode_choice
     local mode="ssh"
     [[ "$mode_choice" == "2" ]] && mode="r2"
+    [[ "$mode_choice" == "3" ]] && mode="storagebox"
 
     printf "\n"
 
@@ -199,8 +448,10 @@ cmd_init() {
 
     if [[ "$mode" == "ssh" ]]; then
         init_ssh "$local_profile"
-    else
+    elif [[ "$mode" == "r2" ]]; then
         init_r2 "$local_profile"
+    else
+        init_storagebox "$local_profile"
     fi
 }
 
@@ -219,7 +470,17 @@ init_ssh() {
 
     step "  ⟳" "Finding remote profile..."
     local remote_profile
-    remote_profile=$(ssh "$user@$host" 'find ~/.zen -maxdepth 1 -type d -name "*.Default (release)" 2>/dev/null | head -1')
+    remote_profile=$(ssh "$user@$host" '
+        for base in "$HOME/.zen" "$HOME/Library/Application Support/zen" "$APPDATA/zen" "$HOME/AppData/Roaming/zen"; do
+            [ -d "$base" ] || continue
+            found=$(find "$base" -maxdepth 3 -type f -name "zen-sessions.jsonlz4" 2>/dev/null | head -1)
+            if [ -n "$found" ]; then
+                dirname "$found"
+                exit 0
+            fi
+        done
+        exit 1
+    ')
     [[ -n "$remote_profile" ]] || die "no Zen profile found on remote"
     ok "Remote: $(basename "$remote_profile")"
 
@@ -240,7 +501,10 @@ CONF
 init_r2() {
     local local_profile="$1"
 
-    command -v age >/dev/null 2>&1 || die "age not installed. Install it first (e.g. sudo pacman -S age)"
+    local age_bin
+    age_bin=$(resolve_tool_path "age") || die "age not installed in this shell. Install age and ensure bash can find it."
+    local age_keygen_bin
+    age_keygen_bin=$(resolve_age_keygen "$age_bin") || die "age-keygen not found. Install full age package (includes age-keygen)."
 
     prompt "Cloudflare Account ID"; read -r account_id
     prompt "R2 Access Key ID"; read -r access_key
@@ -255,7 +519,7 @@ init_r2() {
     local test_config
     test_config=$(printf '{"account_id":"%s","access_key":"%s","secret_key":"%s","bucket":"%s"}' \
         "$account_id" "$access_key" "$secret_key" "$bucket")
-    if python3 "$cloud_py" test "$test_config" >/dev/null 2>&1; then
+    if "$PYTHON_BIN" "$cloud_py" test "$test_config" >/dev/null 2>&1; then
         ok "R2 connected"
     else
         die "could not connect to R2. Check your credentials and bucket name."
@@ -271,7 +535,14 @@ init_r2() {
     local enc_mode="passphrase"
     [[ "$enc_choice" == "2" ]] && enc_mode="keyfile"
 
-    local age_key="$CONFIG_DIR/age-key.txt"
+    if [[ "$enc_mode" == "passphrase" && "$age_bin" == *.exe ]]; then
+        dim "  Passphrase mode is unreliable with Windows age.exe in this shell."
+        dim "  Switching to key file mode to avoid hangs."
+        enc_mode="keyfile"
+    fi
+
+    local age_key
+    age_key=$(default_age_key_path "$age_bin")
     printf "\n"
 
     if [[ "$enc_mode" == "passphrase" ]]; then
@@ -291,6 +562,8 @@ R2_ACCESS_KEY="$access_key"
 R2_SECRET_KEY="$secret_key"
 R2_BUCKET="$bucket"
 AGE_MODE="passphrase"
+    AGE_BIN="$age_bin"
+    AGE_KEYGEN_BIN="$age_keygen_bin"
 LOCAL_PROFILE="$local_profile"
 CONF
     else
@@ -300,7 +573,8 @@ CONF
             dim "  scp $age_key user@host:$age_key"
         else
             step "  🔑" "Generating age encryption key..."
-            age-keygen -o "$age_key" 2>/dev/null
+            mkdir -p "$(dirname "$age_key")"
+            generate_age_key "$age_keygen_bin" "$age_key" || die "failed to generate age key using $age_keygen_bin"
             chmod 600 "$age_key"
             ok "Key saved to $age_key"
             printf "\n"
@@ -316,6 +590,8 @@ R2_SECRET_KEY="$secret_key"
 R2_BUCKET="$bucket"
 AGE_MODE="keyfile"
 AGE_KEY_PATH="$age_key"
+    AGE_BIN="$age_bin"
+    AGE_KEYGEN_BIN="$age_keygen_bin"
 LOCAL_PROFILE="$local_profile"
 CONF
     fi
@@ -323,6 +599,108 @@ CONF
 
     printf "\n"
     printf "  ${GREEN}${B}✓ Config saved${R} ${D}(R2 mode)${R}\n"
+    dim "  Use 'zen-sync push' or 'zen-sync pull' to start syncing"
+    printf "\n"
+}
+
+init_storagebox() {
+    local local_profile="$1"
+
+    local age_bin
+    age_bin=$(resolve_tool_path "age") || die "age not installed in this shell. Install age and ensure bash can find it."
+    local age_keygen_bin
+    age_keygen_bin=$(resolve_age_keygen "$age_bin") || die "age-keygen not found. Install full age package (includes age-keygen)."
+
+    prompt "Storage Box WebDAV URL (e.g. https://u12345.your-storagebox.de)"; read -r storage_url
+    if [[ "$storage_url" != http://* && "$storage_url" != https://* ]]; then
+        storage_url="https://$storage_url"
+    fi
+    prompt "Storage Box username"; read -r storage_user
+    local storage_pass
+    storage_pass=$(secret_prompt "Storage Box password")
+    prompt "Remote folder path" "zen-sync"; read -r storage_path
+    storage_path="${storage_path:-zen-sync}"
+
+    printf "\n"
+    step "  ⟳" "Testing Storage Box connection..."
+    local storage_py
+    storage_py=$(find_py "storagebox.py")
+    local test_config
+    test_config=$(printf '{"url":"%s","username":"%s","password":"%s","path":"%s"}' \
+        "$storage_url" "$storage_user" "$storage_pass" "$storage_path")
+    if "$PYTHON_BIN" "$storage_py" test "$test_config" >/dev/null 2>&1; then
+        ok "Storage Box connected"
+    else
+        die "could not connect to Storage Box. Check URL, username, password, and path."
+    fi
+
+    printf "\n"
+    printf "  ${WHITE}Encryption method:${R}\n\n"
+    printf "    ${PURPLE}❯${R} ${GREEN}1${R}  ${B}Passphrase${R}   ${D}Same passphrase on all devices (recommended)${R}\n"
+    printf "    ${PURPLE}❯${R} ${GREEN}2${R}  ${B}Key file${R}     ${D}Generate key, copy to other devices${R}\n"
+    printf "\n"
+    prompt "Encryption" "1"; read -r enc_choice
+    local enc_mode="passphrase"
+    [[ "$enc_choice" == "2" ]] && enc_mode="keyfile"
+
+    if [[ "$enc_mode" == "passphrase" && "$age_bin" == *.exe ]]; then
+        dim "  Passphrase mode is unreliable with Windows age.exe in this shell."
+        dim "  Switching to key file mode to avoid hangs."
+        enc_mode="keyfile"
+    fi
+
+    local age_key
+    age_key=$(default_age_key_path "$age_bin")
+    printf "\n"
+
+    if [[ "$enc_mode" == "passphrase" ]]; then
+        local passphrase
+        printf "  ${PURPLE}›${R} ${WHITE}Passphrase${R} ${D}(hidden, use the same on all devices)${R} "
+        read -rs passphrase
+        printf "\n"
+        echo "$passphrase" > "$CONFIG_DIR/passphrase"
+        chmod 600 "$CONFIG_DIR/passphrase"
+        ok "Passphrase saved"
+
+        cat > "$CONFIG_FILE" <<CONF
+MODE="storagebox"
+STORAGEBOX_URL="$storage_url"
+STORAGEBOX_USER="$storage_user"
+STORAGEBOX_PASS="$storage_pass"
+STORAGEBOX_PATH="$storage_path"
+AGE_MODE="passphrase"
+AGE_BIN="$age_bin"
+AGE_KEYGEN_BIN="$age_keygen_bin"
+LOCAL_PROFILE="$local_profile"
+CONF
+    else
+        if [[ -f "$age_key" ]]; then
+            ok "Using existing age key"
+        else
+            step "  🔑" "Generating age encryption key..."
+            mkdir -p "$(dirname "$age_key")"
+            generate_age_key "$age_keygen_bin" "$age_key" || die "failed to generate age key using $age_keygen_bin"
+            chmod 600 "$age_key"
+            ok "Key saved to $age_key"
+        fi
+
+        cat > "$CONFIG_FILE" <<CONF
+MODE="storagebox"
+STORAGEBOX_URL="$storage_url"
+STORAGEBOX_USER="$storage_user"
+STORAGEBOX_PASS="$storage_pass"
+STORAGEBOX_PATH="$storage_path"
+AGE_MODE="keyfile"
+AGE_KEY_PATH="$age_key"
+AGE_BIN="$age_bin"
+AGE_KEYGEN_BIN="$age_keygen_bin"
+LOCAL_PROFILE="$local_profile"
+CONF
+    fi
+    chmod 600 "$CONFIG_FILE"
+
+    printf "\n"
+    printf "  ${GREEN}${B}✓ Config saved${R} ${D}(Storage Box mode)${R}\n"
     dim "  Use 'zen-sync push' or 'zen-sync pull' to start syncing"
     printf "\n"
 }
@@ -349,7 +727,7 @@ cmd_push() {
     if [[ "$MODE" == "ssh" ]]; then
         push_ssh "$restart"
     else
-        push_r2 "$restart"
+        push_remote "$restart"
     fi
 }
 
@@ -379,23 +757,32 @@ push_ssh() {
     printf "\n  ${GREEN}${B}✓ Sync complete${R}\n\n"
 }
 
-push_r2() {
+push_remote() {
     local restart=$1
 
+    local backend_py config_json target_label
+    if [[ "$MODE" == "r2" ]]; then
+        backend_py=$(find_py "cloud.py")
+        config_json=$(cloud_config_json)
+        target_label="R2 cloud"
+    else
+        backend_py=$(find_py "storagebox.py")
+        config_json=$(storagebox_config_json)
+        target_label="Storage Box"
+    fi
+
     header "push"
-    printf "  ${D}local${R} ${PURPLE}→${R} ${WHITE}${B}R2 cloud${R}\n\n"
+    printf "  ${D}local${R} ${PURPLE}→${R} ${WHITE}${B}%s${R}\n\n" "$target_label"
 
     step "  ↑" "Encrypting and uploading..."
-    local cloud_py
-    cloud_py=$(find_py "cloud.py")
     local result
-    result=$(python3 "$cloud_py" push "$(cloud_config_json)") || die "upload failed"
+    result=$("$PYTHON_BIN" "$backend_py" push "$config_json") || die "upload failed"
 
     local raw_size enc_size
-    raw_size=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['raw_size'])")
-    enc_size=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['encrypted_size'])")
+    raw_size=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; print(json.load(sys.stdin)['raw_size'])")
+    enc_size=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; print(json.load(sys.stdin)['encrypted_size'])")
 
-    ok "Uploaded $(numfmt --to=iec "$raw_size") (encrypted: $(numfmt --to=iec "$enc_size"))"
+    ok "Uploaded $(human_bytes "$raw_size") (encrypted: $(human_bytes "$enc_size"))"
 
     printf "\n  ${GREEN}${B}✓ Sync complete${R}\n\n"
 }
@@ -411,7 +798,7 @@ cmd_pull() {
     if [[ "$MODE" == "ssh" ]]; then
         pull_ssh "$restart"
     else
-        pull_r2 "$restart"
+        pull_remote "$restart"
     fi
 }
 
@@ -439,29 +826,38 @@ pull_ssh() {
     printf "\n  ${GREEN}${B}✓ Sync complete${R}\n\n"
 }
 
-pull_r2() {
+pull_remote() {
     local restart=$1
 
+    local backend_py config_json source_label
+    if [[ "$MODE" == "r2" ]]; then
+        backend_py=$(find_py "cloud.py")
+        config_json=$(cloud_config_json)
+        source_label="R2 cloud"
+    else
+        backend_py=$(find_py "storagebox.py")
+        config_json=$(storagebox_config_json)
+        source_label="Storage Box"
+    fi
+
     header "pull"
-    printf "  ${WHITE}${B}R2 cloud${R} ${PURPLE}←${R} ${D}local${R}\n\n"
+    printf "  ${WHITE}${B}%s${R} ${PURPLE}←${R} ${D}local${R}\n\n" "$source_label"
 
     [[ "$restart" == "true" ]] && zen_close_local
 
     step "  ↓" "Downloading and decrypting..."
-    local cloud_py
-    cloud_py=$(find_py "cloud.py")
     local result
-    result=$(python3 "$cloud_py" pull "$(cloud_config_json)") || die "download failed"
+    result=$("$PYTHON_BIN" "$backend_py" pull "$config_json") || die "download failed"
 
     local error
-    error=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error',''))" 2>/dev/null)
+    error=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; d=json.load(sys.stdin); print(d.get('error',''))" 2>/dev/null)
     if [[ -n "$error" ]]; then
         die "$error"
     fi
 
     local size
-    size=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['size'])")
-    ok "Downloaded $(numfmt --to=iec "$size")"
+    size=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; print(json.load(sys.stdin)['size'])")
+    ok "Downloaded $(human_bytes "$size")"
 
     printf "\n"
     [[ "$restart" == "true" ]] && zen_open_local
@@ -471,9 +867,29 @@ pull_r2() {
 
 # ─── Status ───────────────────────────────────────────────────────────
 read_spaces() {
-    python3 -c "
-import ctypes, json, struct, sys
-lib = ctypes.CDLL('liblz4.so.1')
+    "$PYTHON_BIN" -c "
+import ctypes, ctypes.util, json, platform, struct, sys
+
+def load_lz4():
+    names = []
+    system = platform.system().lower()
+    if system == 'linux':
+        names.extend(['liblz4.so.1', 'liblz4.so'])
+    elif system == 'darwin':
+        names.extend(['liblz4.1.dylib', 'liblz4.dylib'])
+    elif system == 'windows':
+        names.extend(['liblz4.dll', 'lz4.dll'])
+    found = ctypes.util.find_library('lz4')
+    if found:
+        names.append(found)
+    for name in names:
+        try:
+            return ctypes.CDLL(name)
+        except OSError:
+            pass
+    raise RuntimeError('Unable to load liblz4')
+
+lib = load_lz4()
 with open(sys.argv[1], 'rb') as f:
     data = f.read()
 size = struct.unpack('<I', data[8:12])[0]
@@ -508,25 +924,33 @@ cmd_status() {
             || fail "could not read remote sessions"
         rm -f "$tmp"
     else
-        printf "  ${PURPLE}${B}REMOTE${R} ${D}(R2 cloud)${R}\n"
-        local cloud_py
-        cloud_py=$(find_py "cloud.py")
+        local backend_py config_json label
+        if [[ "$MODE" == "r2" ]]; then
+            backend_py=$(find_py "cloud.py")
+            config_json=$(cloud_config_json)
+            label="R2 cloud"
+        else
+            backend_py=$(find_py "storagebox.py")
+            config_json=$(storagebox_config_json)
+            label="Storage Box"
+        fi
+        printf "  ${PURPLE}${B}REMOTE${R} ${D}(%s)${R}\n" "$label"
         local result
-        result=$(python3 "$cloud_py" status "$(cloud_config_json)" 2>/dev/null) || { fail "could not read remote"; printf "\n"; return; }
+        result=$("$PYTHON_BIN" "$backend_py" status "$config_json" 2>/dev/null) || { fail "could not read remote"; printf "\n"; return; }
 
         local error
-        error=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error',''))" 2>/dev/null)
+        error=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; d=json.load(sys.stdin); print(d.get('error',''))" 2>/dev/null)
         if [[ -n "$error" ]]; then
             fail "$error"
         else
             local ts hostname
-            ts=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['timestamp'])")
-            hostname=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['hostname'])")
+            ts=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; print(json.load(sys.stdin)['timestamp'])")
+            hostname=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; print(json.load(sys.stdin)['hostname'])")
             dim "  Last push: $ts from $hostname"
 
             # Download and read spaces
             local tmp_dir=$(mktemp -d)
-            python3 "$cloud_py" pull "$(cloud_config_json | python3 -c "import sys,json; d=json.load(sys.stdin); d['profile']='$tmp_dir'; print(json.dumps(d))")" >/dev/null 2>&1
+            "$PYTHON_BIN" "$backend_py" pull "$(echo "$config_json" | "$PYTHON_BIN" -c "import sys,json; d=json.load(sys.stdin); d['profile']='$tmp_dir'; print(json.dumps(d))")" >/dev/null 2>&1
             [[ -f "$tmp_dir/zen-sessions.jsonlz4" ]] && read_spaces "$tmp_dir/zen-sessions.jsonlz4"
             rm -rf "$tmp_dir"
         fi
@@ -548,8 +972,10 @@ cmd_merge() {
     if [[ "$MODE" == "ssh" ]]; then
         local remote="$REMOTE_USER@$REMOTE_HOST"
         printf "  ${D}local${R} ${PURPLE}⇄${R} ${WHITE}${B}%s${R}\n\n" "$REMOTE_HOST"
-    else
+    elif [[ "$MODE" == "r2" ]]; then
         printf "  ${D}local${R} ${PURPLE}⇄${R} ${WHITE}${B}R2 cloud${R}\n\n"
+    else
+        printf "  ${D}local${R} ${PURPLE}⇄${R} ${WHITE}${B}Storage Box${R}\n\n"
     fi
 
     [[ "$restart" == "true" ]] && zen_close_local
@@ -564,11 +990,19 @@ cmd_merge() {
             || die "could not download remote zen-sessions"
         scp -q "$remote:$REMOTE_PROFILE/sessionstore-backups/recovery.jsonlz4" "$tmp_dir/recovery.jsonlz4" 2>/dev/null || true
     else
-        step "  ↓" "Downloading from R2..."
-        local cloud_py
-        cloud_py=$(find_py "cloud.py")
-        python3 "$cloud_py" pull "$(cloud_config_json | python3 -c "import sys,json; d=json.load(sys.stdin); d['profile']='$tmp_dir'; print(json.dumps(d))")" >/dev/null \
-            || die "could not download from R2"
+        local backend_py config_json label
+        if [[ "$MODE" == "r2" ]]; then
+            backend_py=$(find_py "cloud.py")
+            config_json=$(cloud_config_json)
+            label="R2"
+        else
+            backend_py=$(find_py "storagebox.py")
+            config_json=$(storagebox_config_json)
+            label="Storage Box"
+        fi
+        step "  ↓" "Downloading from $label..."
+        "$PYTHON_BIN" "$backend_py" pull "$(echo "$config_json" | "$PYTHON_BIN" -c "import sys,json; d=json.load(sys.stdin); d['profile']='$tmp_dir'; print(json.dumps(d))")" >/dev/null \
+            || die "could not download from $label"
         # Move recovery for merge.py
         [[ -f "$tmp_dir/sessionstore-backups/recovery.jsonlz4" ]] && \
             cp "$tmp_dir/sessionstore-backups/recovery.jsonlz4" "$tmp_dir/recovery.jsonlz4"
@@ -581,14 +1015,14 @@ cmd_merge() {
     merge_py=$(find_py "merge.py")
 
     local result
-    result=$(python3 "$merge_py" "$LOCAL_PROFILE" "$tmp_dir") || die "merge failed"
+    result=$("$PYTHON_BIN" "$merge_py" "$LOCAL_PROFILE" "$tmp_dir") || die "merge failed"
 
     local new_spaces new_tabs new_folders new_groups session_merged
-    new_spaces=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['new_spaces'])")
-    new_tabs=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['new_tabs'])")
-    new_folders=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['new_folders'])")
-    new_groups=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['new_groups'])")
-    session_merged=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['session_merged'])")
+    new_spaces=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; print(json.load(sys.stdin)['new_spaces'])")
+    new_tabs=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; print(json.load(sys.stdin)['new_tabs'])")
+    new_folders=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; print(json.load(sys.stdin)['new_folders'])")
+    new_groups=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; print(json.load(sys.stdin)['new_groups'])")
+    session_merged=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; print(json.load(sys.stdin)['session_merged'])")
 
     printf "\n"
     [[ "$new_spaces" -gt 0 ]] && ok "$new_spaces new spaces"

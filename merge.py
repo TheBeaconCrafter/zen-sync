@@ -2,19 +2,38 @@
 """Merge zen-sessions and sessionstore from two Zen Browser profiles."""
 
 import ctypes
+import ctypes.util
 import json
 import struct
 import sys
 import os
 import shutil
+import platform
 from datetime import datetime
 
 
 def load_lz4():
-    try:
-        return ctypes.CDLL("liblz4.so.1")
-    except OSError:
-        return ctypes.CDLL("liblz4.so")
+    candidates = []
+    system = platform.system().lower()
+
+    if system == "linux":
+        candidates.extend(["liblz4.so.1", "liblz4.so"])
+    elif system == "darwin":
+        candidates.extend(["liblz4.1.dylib", "liblz4.dylib"])
+    elif system == "windows":
+        candidates.extend(["liblz4.dll", "lz4.dll"])
+
+    found = ctypes.util.find_library("lz4")
+    if found:
+        candidates.append(found)
+
+    for name in candidates:
+        try:
+            return ctypes.CDLL(name)
+        except OSError:
+            continue
+
+    raise RuntimeError("Unable to load liblz4. Install lz4 for your OS.")
 
 
 def read_mozlz4(path):
@@ -24,14 +43,19 @@ def read_mozlz4(path):
     size = struct.unpack("<I", data[8:12])[0]
     dst = ctypes.create_string_buffer(size + 1000000)
     result = lib.LZ4_decompress_safe(data[12:], dst, len(data) - 12, size + 1000000)
+    if result < 0:
+        raise RuntimeError(f"LZ4 decompression failed for {path}")
     return json.loads(dst.raw[:result])
 
 
 def write_mozlz4(path, obj):
     lib = load_lz4()
     data = json.dumps(obj).encode()
-    compressed = ctypes.create_string_buffer(len(data) * 2)
-    result = lib.LZ4_compress_default(data, compressed, len(data), len(data) * 2)
+    max_size = max(len(data) * 2, 1024)
+    compressed = ctypes.create_string_buffer(max_size)
+    result = lib.LZ4_compress_default(data, compressed, len(data), max_size)
+    if result <= 0:
+        raise RuntimeError(f"LZ4 compression failed for {path}")
     with open(path, "wb") as f:
         f.write(b"mozLz40\x00")
         f.write(struct.pack("<I", len(data)))
