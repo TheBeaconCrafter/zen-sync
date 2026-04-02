@@ -29,8 +29,16 @@ Built because I kept switching between my desktop and laptop and wanted my space
 
 ## Install
 
+### Linux / macOS
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/TheBeaconCrafter/zen-sync/main/install.sh | bash
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/TheBeaconCrafter/zen-sync/main/install.ps1 | iex
 ```
 
 Then run the setup wizard:
@@ -99,6 +107,8 @@ If you plan to use SSH mode on Windows, ensure OpenSSH client/server are install
 - Windows (winget): `winget install --id FiloSottile.age`
 
 If your package manager does not have `age`, install it from the official releases and ensure the `age` command is available in your shell PATH.
+
+If you see `CERTIFICATE_VERIFY_FAILED` on macOS, make sure `zen-sync` is using Homebrew Python (`/opt/homebrew/bin/python3`) or set `ZEN_SYNC_PYTHON=/opt/homebrew/bin/python3` before running `zen-sync`.
 
 ## Sync modes
 

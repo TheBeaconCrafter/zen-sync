@@ -56,6 +56,31 @@ usage() {
 }
 
 detect_python() {
+    if [[ -n "${ZEN_SYNC_PYTHON:-}" ]]; then
+        if [[ -x "$ZEN_SYNC_PYTHON" ]]; then
+            echo "$ZEN_SYNC_PYTHON"
+            return 0
+        fi
+        if command -v "$ZEN_SYNC_PYTHON" >/dev/null 2>&1; then
+            command -v "$ZEN_SYNC_PYTHON"
+            return 0
+        fi
+        die "ZEN_SYNC_PYTHON is set but not executable/found: $ZEN_SYNC_PYTHON"
+    fi
+
+    # On macOS, prefer Homebrew Python because python.org framework builds may
+    # have an uninitialized CA bundle and fail TLS verification.
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        if [[ -x "/opt/homebrew/bin/python3" ]]; then
+            echo "/opt/homebrew/bin/python3"
+            return 0
+        fi
+        if [[ -x "/usr/local/bin/python3" ]]; then
+            echo "/usr/local/bin/python3"
+            return 0
+        fi
+    fi
+
     if command -v python3 >/dev/null 2>&1; then
         echo "python3"
     elif command -v python >/dev/null 2>&1; then
