@@ -163,6 +163,8 @@ During `zen-sync init`, you choose how devices communicate:
 | --------------------------- | -------------------------- |
 | Switch to other device      | `zen-sync push --restart`  |
 | Come back from other device | `zen-sync pull --restart`  |
+| Import only spaces          | `zen-sync pull --spaces-only` |
+| Change local sync profile   | `zen-sync set-local-profile` |
 | Used both, want to combine  | `zen-sync merge --restart` |
 | Just check what's where     | `zen-sync status`          |
 
@@ -173,7 +175,12 @@ Transfers your complete session (spaces, tabs, preferences). The target session 
 ```bash
 zen-sync push --restart    # Close Zen on target, sync, reopen
 zen-sync pull --restart    # Close Zen locally, sync, reopen
+zen-sync pull --spaces-only  # Import only spaces/workspaces files
+zen-sync set-local-profile   # Select a different local Zen profile for sync
 ```
+
+`--spaces-only` intentionally skips `sessionstore-backups/*`, `prefs.js`, and `containers.json`.
+Use this mode if full session import causes extension/profile side effects on macOS.
 
 Without `--restart`, close Zen on the target device manually first.
 

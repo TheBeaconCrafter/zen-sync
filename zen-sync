@@ -40,7 +40,9 @@ usage() {
     printf "${B}  Usage:${R}\n"
     printf "    ${WHITE}zen-sync${R} ${GREEN}push${R}              ${D}Push session to remote${R}\n"
     printf "    ${WHITE}zen-sync${R} ${GREEN}pull${R}              ${D}Pull session from remote${R}\n"
+    printf "    ${WHITE}zen-sync${R} ${GREEN}pull --spaces-only${R} ${D}Pull only spaces/workspaces files${R}\n"
     printf "    ${WHITE}zen-sync${R} ${GREEN}merge${R}             ${D}Merge remote tabs into local${R}\n"
+    printf "    ${WHITE}zen-sync${R} ${GREEN}set-local-profile${R} ${D}Change local profile used for sync${R}\n"
     printf "    ${WHITE}zen-sync${R} ${GREEN}push --restart${R}    ${D}Close Zen, sync, reopen${R}\n"
     printf "    ${WHITE}zen-sync${R} ${GREEN}extract-key${R}       ${D}Export age key file (R2/StorageBox key mode)${R}\n"
     printf "    ${WHITE}zen-sync${R} ${YELLOW}status${R}            ${D}Compare both devices${R}\n"
@@ -754,6 +756,11 @@ SYNC_FILES=(
     "containers.json"
 )
 
+SPACES_ONLY_FILES=(
+    "zen-sessions.jsonlz4"
+    "zen-sessions-backup/clean.jsonlz4"
+)
+
 # ─── Push ─────────────────────────────────────────────────────────────
 cmd_push() {
     load_config
@@ -829,19 +836,22 @@ push_remote() {
 cmd_pull() {
     load_config
     local restart=false
+    local spaces_only=false
     for arg in "$@"; do
         [[ "$arg" == "--restart" ]] && restart=true
+        [[ "$arg" == "--spaces-only" ]] && spaces_only=true
     done
 
     if [[ "$MODE" == "ssh" ]]; then
-        pull_ssh "$restart"
+        pull_ssh "$restart" "$spaces_only"
     else
-        pull_remote "$restart"
+        pull_remote "$restart" "$spaces_only"
     fi
 }
 
 pull_ssh() {
     local restart=$1
+    local spaces_only=$2
     local remote="$REMOTE_USER@$REMOTE_HOST"
 
     header "pull"
@@ -849,8 +859,15 @@ pull_ssh() {
 
     [[ "$restart" == "true" ]] && zen_close_local
 
-    for f in "${SYNC_FILES[@]}"; do
+    local files=("${SYNC_FILES[@]}")
+    if [[ "$spaces_only" == "true" ]]; then
+        files=("${SPACES_ONLY_FILES[@]}")
+        dim "  Spaces-only mode: skipping sessionstore, prefs, and containers"
+    fi
+
+    for f in "${files[@]}"; do
         local dst="$LOCAL_PROFILE/$f"
+        mkdir -p "$(dirname "$dst")"
         if scp -q "$remote:$REMOTE_PROFILE/$f" "$dst" 2>/dev/null; then
             ok "$f"
         else
@@ -866,6 +883,7 @@ pull_ssh() {
 
 pull_remote() {
     local restart=$1
+    local spaces_only=$2
 
     local backend_py config_json source_label
     if [[ "$MODE" == "r2" ]]; then
@@ -883,19 +901,55 @@ pull_remote() {
 
     [[ "$restart" == "true" ]] && zen_close_local
 
-    step "  ↓" "Downloading and decrypting..."
-    local result
-    result=$("$PYTHON_BIN" "$backend_py" pull "$config_json") || die "download failed"
+    if [[ "$spaces_only" == "true" ]]; then
+        step "  ↓" "Downloading and decrypting (spaces-only)..."
+        dim "  Spaces-only mode: skipping sessionstore, prefs, and containers"
 
-    local error
-    error=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; d=json.load(sys.stdin); print(d.get('error',''))" 2>/dev/null)
-    if [[ -n "$error" ]]; then
-        die "$error"
+        local tmp_dir
+        tmp_dir=$(mktemp -d)
+        local pull_config
+        pull_config=$(echo "$config_json" | "$PYTHON_BIN" -c "import sys,json; d=json.load(sys.stdin); d['profile']='$tmp_dir'; print(json.dumps(d))")
+
+        local result
+        if ! result=$("$PYTHON_BIN" "$backend_py" pull "$pull_config"); then
+            rm -rf "$tmp_dir"
+            die "download failed"
+        fi
+
+        local error
+        error=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; d=json.load(sys.stdin); print(d.get('error',''))" 2>/dev/null)
+        if [[ -n "$error" ]]; then
+            rm -rf "$tmp_dir"
+            die "$error"
+        fi
+
+        for f in "${SPACES_ONLY_FILES[@]}"; do
+            local src="$tmp_dir/$f"
+            local dst="$LOCAL_PROFILE/$f"
+            mkdir -p "$(dirname "$dst")"
+            if [[ -f "$src" ]]; then
+                cp "$src" "$dst" || { rm -rf "$tmp_dir"; die "failed to import $f"; }
+                ok "$f"
+            else
+                fail "$f (not found)"
+            fi
+        done
+        rm -rf "$tmp_dir"
+    else
+        step "  ↓" "Downloading and decrypting..."
+        local result
+        result=$("$PYTHON_BIN" "$backend_py" pull "$config_json") || die "download failed"
+
+        local error
+        error=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; d=json.load(sys.stdin); print(d.get('error',''))" 2>/dev/null)
+        if [[ -n "$error" ]]; then
+            die "$error"
+        fi
+
+        local size
+        size=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; print(json.load(sys.stdin)['size'])")
+        ok "Downloaded $(human_bytes "$size")"
     fi
-
-    local size
-    size=$(echo "$result" | "$PYTHON_BIN" -c "import sys,json; print(json.load(sys.stdin)['size'])")
-    ok "Downloaded $(human_bytes "$size")"
 
     printf "\n"
     [[ "$restart" == "true" ]] && zen_open_local
@@ -1033,6 +1087,57 @@ cmd_extract_key() {
     printf "\n"
 }
 
+set_config_local_profile() {
+    local new_profile="$1"
+    local tmp
+    tmp=$(mktemp)
+
+    awk -v profile="$new_profile" '
+        BEGIN { q=sprintf("%c",34); replaced=0 }
+        /^LOCAL_PROFILE=/ {
+            print "LOCAL_PROFILE=" q profile q
+            replaced=1
+            next
+        }
+        { print }
+        END {
+            if (replaced == 0) {
+                print "LOCAL_PROFILE=" q profile q
+            }
+        }
+    ' "$CONFIG_FILE" > "$tmp"
+
+    mv "$tmp" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+}
+
+cmd_set_local_profile() {
+    [[ "$#" -le 1 ]] || die "usage: zen-sync set-local-profile [profile-path]"
+    [[ -f "$CONFIG_FILE" ]] || die "not configured. Run 'zen-sync init' first."
+
+    local new_profile
+    if [[ "$#" -eq 1 ]]; then
+        new_profile="$1"
+        new_profile="${new_profile/#\~/$HOME}"
+    else
+        step "  ⟳" "Finding local profile..."
+        new_profile=$(find_local_profile)
+    fi
+
+    [[ -d "$new_profile" ]] || die "profile path not found: $new_profile"
+    [[ -f "$new_profile/zen-sessions.jsonlz4" ]] || die "invalid profile: missing zen-sessions.jsonlz4 in $new_profile"
+
+    load_config
+    local old_profile="$LOCAL_PROFILE"
+
+    header "set-local-profile"
+    set_config_local_profile "$new_profile"
+    ok "Local profile updated"
+    dim "  old: $old_profile"
+    dim "  new: $new_profile"
+    printf "\n"
+}
+
 # ─── Merge ────────────────────────────────────────────────────────────
 cmd_merge() {
     load_config
@@ -1122,6 +1227,7 @@ case "${1:-help}" in
     push)   shift; cmd_push "$@" ;;
     pull)   shift; cmd_pull "$@" ;;
     merge)  shift; cmd_merge "$@" ;;
+    set-local-profile) shift; cmd_set_local_profile "$@" ;;
     extract-key) shift; cmd_extract_key "$@" ;;
     status) cmd_status ;;
     init)   cmd_init ;;
