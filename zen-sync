@@ -42,6 +42,7 @@ usage() {
     printf "    ${WHITE}zen-sync${R} ${GREEN}pull${R}              ${D}Pull session from remote${R}\n"
     printf "    ${WHITE}zen-sync${R} ${GREEN}pull --spaces-only${R} ${D}Pull only spaces/workspaces files${R}\n"
     printf "    ${WHITE}zen-sync${R} ${GREEN}merge${R}             ${D}Merge remote tabs into local${R}\n"
+    printf "    ${WHITE}zen-sync${R} ${GREEN}sync${R}              ${D}Backup remote, merge latest, then push${R}\n"
     printf "    ${WHITE}zen-sync${R} ${GREEN}set-local-profile${R} ${D}Change local profile used for sync${R}\n"
     printf "    ${WHITE}zen-sync${R} ${GREEN}push --restart${R}    ${D}Close Zen, sync, reopen${R}\n"
     printf "    ${WHITE}zen-sync${R} ${GREEN}extract-key${R}       ${D}Export age key file (R2/StorageBox key mode)${R}\n"
@@ -957,6 +958,145 @@ pull_remote() {
     printf "\n  ${GREEN}${B}✓ Sync complete${R}\n\n"
 }
 
+backup_remote_ssh() {
+    local keep="$1"
+    local remote="$REMOTE_USER@$REMOTE_HOST"
+
+    step "  ⟳" "Creating remote backup on SSH source..."
+    local result
+    result=$(ssh "$remote" "sh -s" -- "$REMOTE_PROFILE" "$keep" <<'EOF'
+set -e
+profile="$1"
+keep="$2"
+backup_root="$profile/zen-sync-backups"
+mkdir -p "$backup_root"
+
+slot="$keep"
+while [ "$slot" -ge 1 ]; do
+    if [ "$slot" -eq "$keep" ]; then
+        rm -rf "$backup_root/$slot"
+    fi
+    if [ "$slot" -gt 1 ] && [ -d "$backup_root/$((slot-1))" ]; then
+        mv "$backup_root/$((slot-1))" "$backup_root/$slot"
+    fi
+    slot=$((slot-1))
+done
+
+mkdir -p "$backup_root/1"
+copied=0
+for f in \
+    "zen-sessions.jsonlz4" \
+    "zen-sessions-backup/clean.jsonlz4" \
+    "sessionstore-backups/recovery.jsonlz4" \
+    "sessionstore-backups/recovery.baklz4" \
+    "sessionstore-backups/previous.jsonlz4" \
+    "prefs.js" \
+    "containers.json"; do
+    src="$profile/$f"
+    dst="$backup_root/1/$f"
+    if [ -f "$src" ]; then
+        mkdir -p "$(dirname "$dst")"
+        cp "$src" "$dst"
+        copied=1
+    fi
+done
+
+if [ "$copied" -eq 1 ]; then
+    echo "created"
+else
+    rm -rf "$backup_root/1"
+    echo "empty"
+fi
+EOF
+) || die "could not create SSH remote backup"
+
+if [[ "$result" == *"created"* ]]; then
+    ok "Remote backup created (kept: $keep)"
+else
+    dim "  No remote session found to back up"
+fi
+}
+
+backup_remote_object_store() {
+    local keep="$1"
+    local backend_py config_json label
+
+    if [[ "$MODE" == "r2" ]]; then
+        backend_py=$(find_py "cloud.py")
+        config_json=$(cloud_config_json)
+        label="R2 cloud"
+    else
+        backend_py=$(find_py "storagebox.py")
+        config_json=$(storagebox_config_json)
+        label="Storage Box"
+    fi
+
+    step "  ⟳" "Creating remote backup on $label..."
+
+    local backup_config
+    backup_config=$(echo "$config_json" | "$PYTHON_BIN" -c "import json,sys; d=json.load(sys.stdin); d['backup_keep']=$keep; print(json.dumps(d))")
+
+    local result
+    if ! result=$("$PYTHON_BIN" "$backend_py" backup "$backup_config" 2>&1); then
+        [[ -n "$result" ]] && dim "  $result"
+        die "could not create remote backup"
+    fi
+
+    local created
+    created=$(echo "$result" | "$PYTHON_BIN" -c "import json,sys; d=json.load(sys.stdin); print('true' if d.get('created') else 'false')" 2>/dev/null || echo "false")
+
+    if [[ "$created" == "true" ]]; then
+        ok "Remote backup created (kept: $keep)"
+    else
+        dim "  No remote session found to back up"
+    fi
+}
+
+backup_remote_source() {
+    local keep="$1"
+
+    if [[ "$MODE" == "ssh" ]]; then
+        backup_remote_ssh "$keep"
+    else
+        backup_remote_object_store "$keep"
+    fi
+}
+
+cmd_sync() {
+    load_config
+
+    local keep=3
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --keep)
+                shift
+                [[ $# -gt 0 ]] || die "missing value for --keep"
+                keep="$1"
+                ;;
+            --keep=*)
+                keep="${1#*=}"
+                ;;
+            *)
+                die "unknown option for sync: $1"
+                ;;
+        esac
+        shift
+    done
+
+    [[ "$keep" =~ ^[0-9]+$ ]] || die "--keep must be a positive integer"
+    (( keep >= 1 )) || die "--keep must be at least 1"
+
+    header "sync"
+    dim "  Flow: backup remote source → merge latest into local → push merged result"
+    printf "\n"
+
+    backup_remote_source "$keep"
+    printf "\n"
+
+    cmd_merge
+    cmd_push
+}
+
 # ─── Status ───────────────────────────────────────────────────────────
 read_spaces() {
     "$PYTHON_BIN" -c "
@@ -1227,6 +1367,7 @@ case "${1:-help}" in
     push)   shift; cmd_push "$@" ;;
     pull)   shift; cmd_pull "$@" ;;
     merge)  shift; cmd_merge "$@" ;;
+    sync)   shift; cmd_sync "$@" ;;
     set-local-profile) shift; cmd_set_local_profile "$@" ;;
     extract-key) shift; cmd_extract_key "$@" ;;
     status) cmd_status ;;

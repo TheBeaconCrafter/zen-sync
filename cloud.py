@@ -252,9 +252,56 @@ def cmd_status(config):
     return json.loads(meta)
 
 
+def _backup_slot_key(slot, name):
+    return f"backups/{slot}/{name}"
+
+
+def _delete_key_if_exists(key, config):
+    try:
+        r2_request("DELETE", key, None, config)
+    except HTTPError as e:
+        if e.code != 404:
+            raise
+
+
+def _copy_key_if_exists(src_key, dst_key, config):
+    data = r2_request("GET", src_key, None, config)
+    if data is None:
+        return False
+    r2_request("PUT", dst_key, data, config)
+    return True
+
+
+def cmd_backup(config, keep=3):
+    """Rotate and create remote backups of the encrypted session blobs."""
+    names = ["session.tar.gz.age", "meta.json.age"]
+
+    for slot in range(keep, 0, -1):
+        if slot == keep:
+            for name in names:
+                _delete_key_if_exists(_backup_slot_key(slot, name), config)
+
+        if slot > 1:
+            prev = slot - 1
+            for name in names:
+                src = _backup_slot_key(prev, name)
+                dst = _backup_slot_key(slot, name)
+                if not _copy_key_if_exists(src, dst, config):
+                    _delete_key_if_exists(dst, config)
+
+    created = False
+    for name in names:
+        if _copy_key_if_exists(name, _backup_slot_key(1, name), config):
+            created = True
+        else:
+            _delete_key_if_exists(_backup_slot_key(1, name), config)
+
+    return {"created": created, "keep": keep}
+
+
 def main():
     if len(sys.argv) < 3:
-        print(f"Usage: {sys.argv[0]} <push|pull|status> <config_json>")
+        print(f"Usage: {sys.argv[0]} <test|push|pull|status|backup> <config_json>")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -303,6 +350,11 @@ def main():
             print(json.dumps({"error": "no remote session found"}))
         else:
             print(json.dumps(meta))
+    elif cmd == "backup":
+        keep = int(config.get("backup_keep", 3))
+        if keep < 1:
+            keep = 1
+        print(json.dumps(cmd_backup(config, keep=keep)))
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         sys.exit(1)

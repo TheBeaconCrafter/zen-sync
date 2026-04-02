@@ -21,6 +21,8 @@
 
 > Forked from enisbudancamanak/zen-sync and quickly adapted for cross-platform use (Linux, macOS, Windows).
 
+> ‼️ ⚠️ WARNING: THIS IS VIBECODED, BETA AND NOT BUG FREE. I am not responsible for any profile corruption, make backups. ‼️ ⚠️ 
+
 Zen Browser doesn't sync spaces or tabs across devices yet. **zen-sync** fills that gap. Push your entire browsing session from one machine to another in seconds.
 
 Built because I kept switching between my desktop and laptop and wanted my spaces and tabs to follow me. Firefox Sync covers bookmarks and passwords, but not Zen's workspaces. This tool transfers the raw session files, similar to [sharing a profile on a dual-boot system](https://github.com/zen-browser/desktop/discussions/2400).
@@ -164,6 +166,7 @@ During `zen-sync init`, you choose how devices communicate:
 | Switch to other device      | `zen-sync push --restart`  |
 | Come back from other device | `zen-sync pull --restart`  |
 | Import only spaces          | `zen-sync pull --spaces-only` |
+| Merge + push safely         | `zen-sync sync`            |
 | Change local sync profile   | `zen-sync set-local-profile` |
 | Used both, want to combine  | `zen-sync merge --restart` |
 | Just check what's where     | `zen-sync status`          |
@@ -176,6 +179,7 @@ Transfers your complete session (spaces, tabs, preferences). The target session 
 zen-sync push --restart    # Close Zen on target, sync, reopen
 zen-sync pull --restart    # Close Zen locally, sync, reopen
 zen-sync pull --spaces-only  # Import only spaces/workspaces files
+zen-sync sync              # Backup remote, merge latest into local, push merged result
 zen-sync set-local-profile   # Select a different local Zen profile for sync
 ```
 
@@ -185,6 +189,23 @@ Use this mode if full session import causes extension/profile side effects on ma
 Without `--restart`, close Zen on the target device manually first.
 
 > In R2/StorageBox modes, `--restart` only applies locally. There is no remote device to close/reopen.
+
+### sync
+
+`sync` is a convenience flow for "take latest remote, merge into local, then push back".
+
+It performs these steps in order:
+
+1. Create a backup of the current remote source
+2. Merge remote tabs/spaces into local
+3. Push merged local state back to remote
+
+By default it keeps **3 remote backups**. You can override this:
+
+```bash
+zen-sync sync
+zen-sync sync --keep 5
+```
 
 ### merge
 
